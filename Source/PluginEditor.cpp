@@ -368,7 +368,7 @@ void LevelMeter::paint (juce::Graphics& g)
     constexpr float lo = -40.0f, hi = 6.0f, thickness = 6.0f;
     const auto r = getLocalBounds().toFloat();
     const auto bar = r.withSizeKeepingCentre (r.getWidth(), thickness);
-    const auto xFor = [&bar] (float db) { return bar.getX() + bar.getWidth() * juce::jlimit (0.0f, 1.0f, (db - lo) / (hi - lo)); };
+    const auto xFor = [&bar, low = lo, high = hi] (float db) { return bar.getX() + bar.getWidth() * juce::jlimit (0.0f, 1.0f, (db - low) / (high - low)); };
 
     g.setColour (Theme::label.withAlpha (0.25f));
     g.fillRect (bar);
