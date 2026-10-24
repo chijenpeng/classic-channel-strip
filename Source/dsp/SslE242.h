@@ -25,7 +25,21 @@ ModulePtr makeSslE242();
     analog-recreation module that this one extends (12 controls, no filter network, no EQ IN
     switch); filtersOnly is the HPF / LPF section alone (4 controls). */
 enum class SslSections { all, eqOnly, filtersOnly };
+
+/** The large coupling capacitors that the card model replaces by shorts, except the ones in
+    kSslKeptCapacitors. Names are the schematic's reference designators. */
+inline constexpr std::array<const char*, 15> kSslLargeCapacitors {
+    "C22", "C1", "C2", "C6", "C7", "C11", "C14", "C20", "C21", "C51", "C39", "C41", "C42", "C46", "C47" };
+// (C39 stands for C39 and C40, in series in the HPF's output network.)
+
+/** The ones the model keeps as capacitors: shorting any of them moves the response by more than
+    0.05 dB somewhere in 20 Hz - 20 kHz (README, "Approximations"). Bit i is kSslLargeCapacitors[i]. */
+inline constexpr unsigned kSslKeptCapacitors = (1u << 2) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 10);   // C2, C11, C14, C20, C21, C39
+
 ModulePtr makeSslE242 (SslSections sections);
+/** channels = 2 gives one stereo module (isStereo(), processStereo()) whose two channels share
+    the matrices. */
+ModulePtr makeSslE242 (SslSections sections, int channels);
 
 inline constexpr int kSslFilterParamCount = 4;
 inline constexpr int kSslEqParamOffset = kSslFilterParamCount;

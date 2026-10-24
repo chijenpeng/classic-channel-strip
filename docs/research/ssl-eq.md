@@ -1,11 +1,12 @@
 # SSL 4000 E "black knob" channel EQ (82E242): model and response check
 
-The plug-in solves the EQ card of the SSL 4000 E console, 82E242 Rev. 4, from its schematic with
-a circuit engine (`Source/dsp/SslE242.cpp`, module id `ssl_e242`). The four bands were first
+The plug-in models the EQ card of the SSL 4000 E console, 82E242 Rev. 4, from its schematic: a
+circuit netlist (`Source/dsp/SslE242.cpp`, `SslE242Card.h`, module id `ssl_e242`) whose discrete-time
+state space the plug-in runs (see "The plug-in's engine" below). The four bands were first
 modelled in the analog-recreation project (its `ssl_e242` block, issue #23 there), and this note
 was written there; the plug-in carries the bands over unchanged (same netlist, laws, trimmers,
-pre-warping and op-amp model: the EQ section renders bit for bit like analog-recreation's
-module) and adds the card's HPF / LPF section, which has its own note,
+pre-warping and op-amp model, as of v0.1.0, where the EQ section rendered bit for bit like
+analog-recreation's module) and adds the card's HPF / LPF section, which has its own note,
 [82e242-filters.md](82e242-filters.md). This note covers the sources, how the controls map onto
 the card's pots, the level, and how the model's responses compare with the schematic and with
 SSL's own specification. Component values are in the [schematic reference](../reference/schematic.md).
@@ -381,12 +382,157 @@ Exact dB everywhere was rejected:
 The knobs' help texts give the ranges (±18 at the narrowest Q, about ±15.5 at the wider ones, the
 shelves' ±15.5 / ±16.5).
 
+## The plug-in's engine: a linear state space of the same netlist
+
+Version 0.2.0 no longer solves the netlist every sample. For fixed knobs, with every op-amp below its
+limit, the pre-warped trapezoidal card is a linear time-invariant system, so the circuit solver is
+asked once per control update (every 32 samples while a control moves) for that system's discrete
+state space, `s[n+1] = A s[n] + B u[n]`, `y[n] = C s[n] + D u[n]` (`LinearNetwork::extractStateSpace`).
+The states are the capacitors' trapezoidal companion histories; `A = -I - 2 diag(g) W` with `W` the
+capacitor-voltage response to a unit history, found by N + 1 solves of the already factored matrix.
+A pre-warp change keeps each capacitor's voltage and current (`hist' = hist + (g - g') v`, as
+`setCapacitorWarp` does), a pot or switch change keeps the histories, so sweeps stay click-free.
+Everything is derived from the netlist and the control laws; nothing is fitted to a curve.
+
+Version 0.1.0 of this plug-in (our own previous release) ran the whole netlist per sample with each of
+the 13 NE5534s as a nonlinear Newton device. The numbers below that compare with "v0.1.0's engine" were
+measured against that version.
+
+**Realisation.** Networks, cut where an op-amp output drives the next part (the part behind it loads
+the one before it by the amp's closed-loop output impedance, a fraction of an ohm):
+
+| Network | States | What |
+|---|---|---|
+| hpf | 4 | C34, C36, C37 and C39 / C40 (merged into 110 µF), T11, T12; loaded by S4's contact, R66 and R70 (the LPF's input load) |
+| lpf | 2 | C43, C44, T13 |
+| eq1 | 9 | T3's section: HF, HMF; C8, C79, C3, C4, C5, C9, C10, C2, C11 |
+| eq2 | 8 | T8's section: LMF, LF; C15, C16 ‖ C17, C18 ‖ C19, C12, C13, C14, C20, C21 |
+| dcb | 1 | C23 / C24 (110 µF) into R53: the output DC blocker |
+
+The 24 states run as dense double-precision products, 4 to 9 states each, in registers (NEON or
+SSE2, unrolled per state count), and for a stereo instance both channels in the two lanes of every
+vector with shared matrices. The HPF and LPF switches and EQ IN route the signal as the contacts do;
+every stage runs whether it is switched in or not.
+
+**Which large capacitors stay.** Worst response change from shorting one capacitor, all the others
+kept, 48 kHz, 61 settings, 20 Hz – 20 kHz:
+
+| C22 | C1 | C2 | C6 | C7 | C11 | C14 | C20 | C21 | C51 | C39 + C40 | C41, C42, C46, C47 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.018 | 0.018 | 0.060 | 0.009 | 0.026 | 0.42 | 2.05 | 0.28 | 0.090 | 0.031 | 2.38 | 0.0006 each |
+
+(dB.) C14 and C11 sit in the Q-pot's positive-feedback path: a 1.6 Hz corner still matters at the
+skirts of a narrow +18 dB bell. Kept: C2, C11, C14, C20, C21 and C39 / C40 (the series 110 µF); shorted:
+the rest. With C7 (0.026), C51 (0.031) and the pair C22 / C1 (0.018 each) shorted too the total is
+0.047 dB, inside a 0.1 dB budget, and each kept capacitor costs a state, so the line is drawn at
+0.05 dB. A DC offset is blocked by the output capacitor only. The 50 Ω behind each op-amp in v0.1.0's
+engine changes the grid by 0.001 dB and is left out. Leaving the HPF's load (R66 and R70) out of its
+network costs 4.3 dB at 20 Hz: the 110 µF in its output network is not a short there, so the load
+stays in.
+
+**Accuracy against v0.1.0's engine.** 61 settings (each band at ±18 dB, frequency at both ends and the
+middle, Q at both ends, shelf and bell; HPF in at 16, 80 and 390 Hz; LPF in at 3.2, 12 and 22 kHz; EQ
+out; four mixed), impulse response at -40 dBFS, every FFT bin 20 Hz – 20 kHz:
+
+| Rate | Worst | Setting | Next |
+|---|---|---|---|
+| 48 kHz | 0.0471 dB at 20 Hz | HF +18 dB, 1.3 kHz, bell | 0.043 (mixed D, 20 kHz), 0.040 (LF -18 dB 37 Hz bell, 20 Hz), 0.039, 0.034 |
+| 96 kHz | 0.0472 dB at 20 Hz | the same | 0.040, 0.039, 0.034, 0.033 |
+
+Time-domain null on noise (4 s, the last 2^17 samples, residual energy against v0.1.0's output,
+20 Hz – 20 kHz): -40 dBFS peak, worst -46.2 dB (48 kHz) / -46.5 dB (96 kHz) (mixed B), mean -58.8 /
+-58.4 dB. At -12 dBFS peak the worst is -36.7 / -44.1 dB (all four bands +18, which clips: the
+saturation differs, below), mean -58.0 / -57.6 dB. Over the whole band the worst is -26 dB: the
+subsonic range, where this engine has fewer high-pass poles.
+
+Control sweep (each control and then all together moved over its range in 2 s while a 1 kHz tone at
+-12 dBFS plays, blocks of 512): all finite; the largest sample-to-sample jump equals v0.1.0's to the
+fourth decimal in every case (0.1140 against 0.1138 for all together); the largest difference between
+the two engines is 0.0012.
+
+**Saturation.** The op-amp curve (exactly linear to ±14.85 V, where the clipper returns its input bit
+for bit; tanh only above the knee, into ±16.5 V) is applied in feed-forward form at the section outputs
+T3 and T8 and, with the HPF / LPF in, at T12 and T13. v0.1.0's engine put it in every op-amp's feedback
+loop. Headroom map (measured on v0.1.0's engine, impulse response at -40 dBFS read at its worst
+frequency; the level at which the amp's output reaches ±14.85 V):
+
+| Op-amp | Flat | Worst gain | Worst setting | Reaches the limit at (dBFS in) |
+|---|---|---|---|---|
+| T1 (HF band-pass) | -46.6 dB | +1.2 dB | HF +18 bell 19 kHz | +3.4 |
+| T2 (HF out) | -26.0 | +17.1 | HF +18 bell 19 kHz | -12.4 |
+| T3 (section 1 sum) | 0.0 | +18.3 | all four +18 (alone: +18.2, HMF 9.4 kHz Q 4.1) | -13.7 (alone -13.5) |
+| T4 (HMF band-pass) | -58.8 | +16.6 | HMF +18 9.4 kHz Q 4.1 | -12.0 |
+| T5 (HMF out) | -51.1 | +16.7 | the same | -12.0 |
+| T6 (LMF band-pass) | -71.8 | +18.5 | all four +18 (alone: +16.7, Q 4.2) | -13.8 (alone -12.0) |
+| T7 (LMF out) | -64.0 | +26.3 | all four +18 (alone: +16.8) | -21.6 (alone -12.1) |
+| T8 (section 2 sum) | 0.0 | +28.5 | all four +18 (alone: +18.1) | -23.9 (alone -13.5) |
+| T9 (LF band-pass) | -88.0 | +12.1 | all four +18 (alone, bell 37 Hz: +10.5) | -7.5 (alone -5.8) |
+| T10 (LF out) | -67.8 | +18.7 | all four +18 (alone: +17.1) | -14.1 (alone -12.4) |
+| T11 (HPF follower) | -6.0 | -5.9 | HPF in | +10.5 |
+| T12 (HPF out) | 0.0 | +0.1 | HPF in | +4.5 |
+| T13 (LPF out) | 0.0 | +0.1 | HPF in 16 Hz | +4.5 |
+
+Flat, the first amps to reach the limit are T3, T8, T12 and T13 at +4.6 dBFS in, which is the card's
+output level there. With one band at +18 dB, T3 or T8 reaches it first, 1.0 dB (HF bell: T2),
+1.2 – 1.5 dB (HMF / LMF at the narrowest Q: T4 / T5, T6 / T7) and 1.1 dB (LF bell: T10) before the
+internal amp; with all four bands at +18 dB the order is T8 (-23.9), T7 (-21.6), T3 (-13.7), then the
+others. So the section output is the right place for the clipper, and the amps it leaves out are 1 – 2
+dB behind it in the worst cases. A typical setting (HF +4 shelf, HMF +3 dB at 2.5 kHz, LMF -3 at 300,
+LF +3 at 80, HPF 40 Hz in) puts T3 and T8 at +3.6 dB: a snare peaking at -6 dBFS is at -2.4 dBFS
+there and stays linear (the limit is +1.0 dBFS in). A +18 dB narrow bell leaves the linear region at
+-13.5 dBFS in at its centre frequency, a +12 dB bell at about -7.5. The CARD lamp in the editor lights
+when any clipper is reached.
+
+THD, 1 kHz, 48 kHz, this engine against v0.1.0's:
+
+| Setting | Level | This engine: peak, THD | v0.1.0: peak, THD |
+|---|---|---|---|
+| flat | -6 dBFS | -6.04, 0.000 % | -6.05, 0.000 % |
+| flat | +6 | +5.30, 2.92 % | +5.24, 2.71 % |
+| flat | +10 | +5.34, 18.9 % | +5.25, 14.6 % |
+| HPF 80 Hz + LPF 12 kHz in | +6 | +5.13, 3.73 % | +5.23, 3.15 % |
+| HPF 80 Hz + LPF 12 kHz in | +10 | +5.16, 19.6 % | +5.24, 19.1 % |
+| HMF +12 dB, 1 kHz, Q 1.5 | +6 | +5.35, 34.9 % | +5.25, 34.3 % |
+| HMF +18 dB, 1 kHz, Q 4.1 (narrow) | -6 | +5.34, 23.9 % | +5.25, 13.3 % |
+| HMF +18 dB, 1 kHz, Q 4.1 (narrow) | +6 | +5.34, 41.5 % | +5.26, 30.0 % |
+| HMF +18 dB, 1 kHz, Q 4.1 (narrow) | +10 | +5.36, 41.6 % | +5.24, 34.3 % |
+| LF +18 dB shelf, 100 Hz | +6 | +5.58, 38.0 % | +5.38, 30.9 % |
+
+The clipper matches where the section output is what clips; where it is a boosted band's own loop
+(the narrow +18 dB bell), v0.1.0's amps clipped inside their feedback, which lowers the band's gain
+and the harmonics; the feed-forward clipper overstates the distortion there (41 % against 30 %), all
+of it at levels where the output is already 10 dB over the limit. Feeding a band-internal amp's output
+back as one more output row and clipping there was considered and not built: a feed-forward row cannot
+reproduce the loop's gain reduction, and the amp is within 1.2 dB of the section output at the narrowest
+Q, where both are 10 dB or more into the rail.
+
+**Speed** (Apple M3, one core, a busy machine, x realtime, best of several passes; the current
+release's figures are in the README):
+
+| | v0.1.0 | This engine |
+|---|---|---|
+| card, mono, 48 kHz | 10.1 (8.9 under load) | 1050 |
+| card, mono, 96 kHz | 4.9 (3.5) | 525 |
+| plug-in, defaults, stereo, 1x / 2x | 4.3 / 2.1 | 820 / 270 |
+| plug-in, defaults, mono, 1x / 2x | 9.5 / 4.4 | 1055 / 400 |
+| everything in (filters, bands, dynamics), stereo, 1x / 2x | 4.2 / 2.2 | 300 / 130 |
+| everything in, mono, 1x / 2x | 7.6 / 4.8 | 354 / 165 |
+| everything in, every card control moving, stereo, 1x / 2x | 4.4 / 2.4 | 92 / 66 |
+| everything in, every card control moving, mono, 1x / 2x | 8.5 / 4.7 | 99 / 73 |
+
+With the card this fast the dynamics dominated: its coefficients (up to seven `exp()` calls per sample)
+are now computed once per block, its two logarithms are one (the dB law is monotonic), and the gate,
+whose range the plug-in keeps at 0 dB, is skipped while it is idle: bit-identical audio up to float
+rounding.
+
 ## What is approximated
 
-- **Op-amps**: the engine's op-amp device, open-loop gain 1500 behind 50 Ω, memoryless (a 5534 with
-  22 pF has about that gain at 7 kHz; its DC figure of 100 dB makes Newton's method crawl in this
-  engine). It costs 0.04 dB at flat; the trimmer set-up absorbs it in the bands. Linear to
-  ±14.85 V, then a tanh knee into ±16.5 V. Slew rate and the real gain-bandwidth are not modelled.
+- **Op-amps**: open-loop gain 1500, memoryless (a 5534 with 22 pF has about that gain at 7 kHz; its
+  DC figure of 100 dB would make a nonlinear solver crawl). It costs 0.04 dB at flat; the trimmer
+  set-up absorbs it in the bands. The amp is an ideal gain-1500 source (v0.1.0 put 50 Ω behind it;
+  the difference is 0.001 dB). Linear to ±14.85 V, then a tanh knee into ±16.5 V, applied once at
+  each section's output (see "The plug-in's engine"). Slew rate and the real gain-bandwidth are not
+  modelled.
 - **J112s**: 50 Ω switches (their r_DS(on) is at most 50 Ω; they sit in series with 2.2–100 µF).
 - **Trimmers**: set by the ECO's procedure on the schematic: RV1 1992 Ω, RV2 182.9 Ω, RV3 176.8 Ω,
   RV4 714 Ω. "Frequency pots at mid position" is taken as 7k5 of the 50k (15 %, a log law); a real
@@ -404,36 +550,23 @@ shelves' ±15.5 / ±16.5).
 
 ## Engine changes
 
-These circuit-engine changes began in analog-recreation; this plug-in retains the generic
-modified-nodal solver and the op-amp behavior it uses, while removing unreferenced device models,
-specialized device solvers, and amp-building helpers. The parameter-smoothed module base is
-`Source/dsp/CircuitModule.*`; its public interface is in `Source/dsp/Module.h`. To make ten op-amps
-solved jointly affordable, the op-amp device gained an optional linear core
-(`OpAmpDevice`'s `linearFraction`): exactly linear up to a knee, then tanh into the rail. Groups of
-devices that are affine where they work (`Device::affineBetween`) stop Newton after an exact step
-and reuse the factored Jacobian while it does not change. The original analog-recreation change
-was checked against all 42 other modules at 48 kHz. Its module also names nodes leaves-first,
-which cuts the LU's non-zeros from 1273 to 455.
+The circuit solver (`Source/dsp/circuit/`) is a modified-nodal solver adapted from the
+analog-recreation project; the parameter-smoothed module base is `Source/dsp/CircuitModule.*`, and its
+public interface is in `Source/dsp/Module.h`. This release uses it to build and factor the network
+and to extract the state space; it no longer contains the nonlinear device solvers v0.1.0 used per
+sample (the op-amp device with its linear core and the Newton device groups).
 
-For decisions 1 and 2, `LinearNetwork` gained pre-warped capacitors: `warpedCapacitor()` adds one
-and `setCapacitorWarp (index, hz)` scales its trapezoidal companion conductance by x / tan x
+For decisions 1 and 2, `LinearNetwork` has pre-warped capacitors: `warpedCapacitor()` adds one and
+`setCapacitorWarp (index, hz)` scales its trapezoidal companion conductance by x / tan x
 (x = π hz T), so its admittance is the analog one at hz; 0 Hz is the plain rule. A change while
-running keeps the capacitor's voltage and current (the history term is adjusted) and refactors
-like a pot. Plain `capacitor()` is untouched; in the original analog-recreation check, the other
-modules render bit for bit as before:
-`amp_eval <id> --wav` (192 kHz, 16-bit) and `amp_eval <id> --ir` (48 kHz, 32-bit float) are
-byte-identical before and after for all 47 other modules, and so are amp_eval's operating points
-and levels.
+running keeps the capacitor's voltage and current (the history term is adjusted) and refactors like a
+pot. Plain `capacitor()` is untouched. The pre-warping adds nothing per sample: it changes
+conductances when a frequency or shape control moves, which refactors anyway.
 
-Cost, mono, one core (analog-recreation's measurement): 14.1x realtime at 48 kHz in `amp_eval`
-(12.5x on noise, 12.2x with every band in use, `fx_test --ssl`), 6.8x / 6.3x at 96 kHz;
-1.0–1.3 Newton iterations per sample, no failed solves. In this plug-in, measured on an Apple M3
-under load (load average 9–13 on 8 cores), the same EQ netlist ran at 10–11x at 48 kHz and the
-whole card (the filter network adds three op-amps in their own Newton group and 27 nodes) at
-8.5–9.5x, 4.6x at 96 kHz (`classic_channel_measure 48000 --time`, `classic_channel_test`): the filters cost about 20 %. Under heavy clipping (all four bands at +18 dB on a full-scale chord) 11.4x. The
-pre-warping adds nothing per sample (it changes conductances when a frequency or shape control
-moves, which refactors anyway): in six interleaved `amp_eval` runs at 48 kHz on a busy machine the
-best were 11.8x before and 12.9x after.
+Cost with v0.1.0's engine, mono, one core, Apple M3 under load (load average 9–13 on 8 cores): the EQ
+netlist ran at 10–11x realtime at 48 kHz and the whole card at 8.5–9.5x, 4.6x at 96 kHz; the filters
+cost about 20 %, and heavy clipping (all four bands at +18 dB on a full-scale chord) 11.4x. See
+"Speed" above for this engine.
 
 ## The plug-in at 1x and 2x
 

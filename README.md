@@ -2,12 +2,13 @@
 
 Inspired by the SSL 4000 E channel.
 
-Part of the codycodie legacy release collection.
+Part of the codycodie plug-in collection.
 
 Classic Channel Strip models the 82E242 Rev. 4 filters and four-band EQ with the issue-15 82E10
 compressor/limiter. Gate controls remain in saved state for compatibility, but gate attenuation is
-permanently bypassed. The circuit-based model uses idealized device equations and documented
-approximations; it is not a component-exact recreation of a particular console.
+permanently bypassed. The model is a linear discrete-time state space extracted from the schematic
+netlist (24 states for the 82E242 card), with documented approximations; it is not a component-exact
+recreation of a particular console.
 
 ![Classic Channel Strip editor](docs/editor.png)
 
@@ -36,6 +37,7 @@ ad-hoc signed and not notarized. The Windows package includes an unsigned x64 VS
 | LF gain, freq, shape | ±18 dB; 37–420 Hz; Shelf / Bell | Low-frequency shelf or bell. |
 | EQ | Out / In | Switches the four EQ bands; filters remain active. |
 | Output | −20 … +20 dB | Gain after the card. |
+| CARD lamp | Indicator | Lights when an op-amp in the card goes past its linear limit (±14.85 V, +4.6 dBFS at the card with the EQ flat; boosts lower it). It holds for about a second and reads the peak reached, in dBFS at the card. Turn Input down to stay clean. |
 | Oversampling | 1× / 2× | Processes at host rate or twice that rate. 2× adds 4 samples of latency. |
 | Dynamics | Out / In | Stereo-linked 82E10 compressor/limiter. Bypass is bit-transparent. |
 | Comp threshold, ratio | +10 … −20 dB; 1:1 … LIMIT | Feed-forward compression with the card's diode-network soft knee. |
@@ -47,6 +49,17 @@ ad-hoc signed and not notarized. The Windows package includes an unsigned x64 VS
 Default order is Input → Dynamics → HPF → LPF → EQ → Output. Post EQ places dynamics after the
 card. The FILTERS and EQ sidechain options process a detector copy through the corresponding card
 section. External uses the host's optional key input.
+
+## Limits
+
+- Gate controls stay in saved state for compatibility, but gate attenuation is always zero.
+- The CARD lamp and the op-amp clipping: below +4.6 dBFS at the card (EQ flat; boosts lower it) the
+  card is linear and matches v0.1.0 within 0.05 dB. Above it, clipping is one curve at the section
+  outputs, an approximation that overstates the distortion of a narrow, boosted band.
+- Below about 5 Hz the card has fewer high-pass poles than the drawing, so a DC offset is blocked at
+  the output only.
+- Switching Oversampling while audio plays restarts the card at the new rate and can click.
+- No DAW-host test on an end-user Windows system or an Intel Mac runtime test has been performed.
 
 ## Build
 
@@ -60,18 +73,31 @@ ctest --test-dir build --output-on-failure
 ./build/classic_channel_snapshot_artefacts/Release/classic_channel_snapshot docs/editor.png
 ```
 
+For the universal macOS package, add `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"` and run
+`tools/package_macos.sh` from a clean, committed tree; it writes
+`build-release/dist/classic-channel-strip-<version>-macos-universal.zip` and a `.sha256` companion.
+
 Plug-in copying is disabled by default. Set `-DCOPY_PLUGIN_AFTER_BUILD=ON` only when you want CMake
 to copy AU and VST3 bundles to the current user's plug-in folders.
+
+## Validation
+
+Version 0.2.0 on macOS (Apple Silicon): CTest 2/2 (`classic_channel_test`, with its state-space
+accuracy, headroom and clipper checks, and `classic_channel_processor_test`), universal arm64 + x86_64
+AU and VST3 slices, `auval -v aufx ClCs Cdpg` passing, and the VST3 loading in an offline host with
+the same 34 parameters in the same order as v0.1.0. The editor was inspected at its default,
+minimum and maximum sizes and with the CARD lamp lit. The Windows package is built and tested by the
+repository's release workflow.
 
 ## Tests and tools
 
 | Target / command | Coverage |
 |---|---|
-| `classic_channel_test` | Offline EQ/filter circuit regression and dynamics checks. |
+| `classic_channel_test` | Offline EQ/filter regression (including the state-space engine's response, headroom and clipper checks) and dynamics checks. |
 | `classic_channel_processor_test` | Parameter order, old-state migration, mono/stereo and sidechain buses, permanent gate bypass, pre/post routing, oversampling, latency and audio-thread allocations. |
-| `classic_channel_measure` | Magnitude response, sine gain/THD, and realtime measurements. Use `--list` for parameter IDs. |
+| `classic_channel_measure` | Magnitude response (`fs [id=value ...]`), sine gain/THD (`--sine hz dbfs`) and realtime factor (`--time`) of the card model. Use `--list` for parameter IDs. |
 | `classic_channel_eq_ac` | AC analysis used to derive circuit control laws and trim values. |
-| `classic_channel_snapshot docs/editor.png` | Editor snapshot; `--size w h` checks scaling, `--curve` measures response, and `--render in.wav out.wav` renders audio offline. |
+| `classic_channel_snapshot docs/editor.png` | Editor snapshot; `--size w h` checks scaling, `--overload` lights the CARD lamp, `--curve` measures response, `--render in.wav out.wav` renders audio offline, and `--time [--mono] [--moving] [--rate fs]` times `processBlock`. |
 
 ## Circuit model and sources
 
@@ -83,13 +109,30 @@ to copy AU and VST3 bundles to the current user's plug-in folders.
 - **82E10 dynamics.** The issue-15 service drawing supplies the detector, VCA path, control
   networks, timing, stereo link and metering behavior. The AD536J and DBX 2151 are data-sheet
   macromodels because the drawing treats them as IC blocks. See [the dynamics note](docs/research/82e10-dynamics.md).
-- **Approximations.** Op-amps use a finite-gain idealized model with soft clipping; switching is
-  instantaneous; part tolerances, temperature drift, supply noise and self-noise are not simulated.
-  The equations represent the documented circuit, not semiconductor internals.
+- **Engine.** The 82E242 netlist (every resistor, capacitor, pot and switch on the drawing except the
+  items listed in the notes) is solved with the trapezoidal rule and pre-warped capacitors. For fixed
+  knobs and op-amps below their limit that card is a linear time-invariant system, so on each
+  control update the circuit solver extracts its discrete state space (24 states: HPF 4, LPF 2, HF and
+  HMF section 9, LMF and LF section 8, output DC blocker 1) and each block runs as small dense
+  matrix products. Matrices come from the netlist and the control laws, not from fitted curves.
+  Against v0.1.0's engine (our own previous release, which solved the whole netlist every sample with
+  nonlinear op-amp devices) the response matches within 0.05 dB from 20 Hz to 20 kHz over 61
+  settings at 48 and 96 kHz.
+- **Approximations.** Op-amps are ideal gain-1500 sources with no slew rate or bandwidth limit.
+  Op-amp clipping (linear to ±14.85 V, soft knee into ±16.5 V) is one curve applied at the section
+  outputs rather than inside every op-amp's feedback loop; it differs from v0.1.0 only when the card
+  is driven past +4.6 dBFS, and then overstates the distortion of a narrow +18 dB bell. Large coupling
+  capacitors (2.2 µF and up, acting below a few Hz) are replaced by shorts, so below about 5 Hz the
+  card has fewer high-pass poles than the drawing; the loading of one section on the previous is
+  dropped where it did not matter. Switching is instantaneous; part tolerances, temperature drift,
+  supply noise and self-noise are not simulated. The equations represent the documented circuit, not
+  semiconductor internals. The notes list every approximation and the headroom map (which op-amp
+  clips first, and at what input level, for each setting).
 - **Sources.** Primary schematic archives are linked from the research notes. Raw schematic scans
   and OCR are kept in the private research source and are not included in this public repository.
 
-The four-band EQ matches the analog-recreation project's `ssl_e242` module. Trapezoidal integration
+The four-band EQ netlist, control laws and trimmers come from the analog-recreation project's
+`ssl_e242` module. Trapezoidal integration
 and capacitor pre-warping align circuit corners with knob settings across sample rates. At 44.1 / 48
 kHz, one step of the integration rule cannot reproduce the top-octave bell and LPF shape as closely;
 2× processing brings them closer to the circuit analysis.
@@ -101,9 +144,16 @@ Oversampling changes are applied on the message thread after audio leaves the id
 `processBlock` does not construct an engine. Switching while audio plays restarts the card at the
 new rate from rest and can produce a small click.
 
-The detailed circuit model is CPU-demanding. A historical measurement on a busy Apple M3 was
-8.5–9.5× real time per channel at 48 kHz / 1×; at 96 kHz it was about 4.6×, and a stereo instance at
-48 kHz / 2× used about 45% of one core. Actual use depends on the computer, sample rate and settings.
+CPU, measured on an Apple M3 (arm64 build, one core, 48 kHz, 512-sample blocks) while other work was
+loading the machine, so these are conservative: `classic_channel_snapshot --time` with both filters,
+all four bands and the dynamics in, stereo, ran at about 270x real time at 1x and 120x at 2x (best of
+several passes); the defaults ran at about 825x at 1x and 260-270x at 2x. An offline plug-in host
+benchmark of the VST3 at the native defaults (stereo, 48 kHz, 512-sample blocks, 2x) gave 268-270x
+real time, 40 µs per block against a 10.7 ms deadline. v0.1.0's engine ran roughly 2-4x real time in
+the same settings (our earlier measurements), so this release uses about 1/100 of the CPU. With
+every card control moving all the time the cost rises (`--moving`: about 90x at 1x and 60-67x at 2x,
+stereo, everything in), because the state space is re-extracted every 32 samples. Actual use depends
+on the computer, sample rate and settings.
 The processor regression test checks that `processBlock` makes zero allocations with controls still,
 moving, oversized blocks, and during an oversampling change.
 
@@ -111,7 +161,7 @@ moving, oversized blocks, and during an oversampling change.
 
 | Path | Contents |
 |---|---|
-| `Source/dsp/` | The card's circuit model and modified-nodal solver; no JUCE dependency. |
+| `Source/dsp/` | The card's netlist, state-space extraction and runner (`StateSpaceBlock`), the 82E10 model and the modified-nodal solver; no JUCE dependency. |
 | `Source/PluginProcessor.{h,cpp}` | Processor, stable parameter/state schema, oversampling and meters. |
 | `Source/PluginEditor.{h,cpp}` | Scalable editor, real controls and meters, and hover help. |
 | `Source/ResponseAnalyser.{h,cpp}` | Offline response measurement for the snapshot utility. |

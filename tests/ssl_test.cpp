@@ -10,7 +10,6 @@
 
 #include "dsp/SslE242.h"
 #include "dsp/SslE10Dynamics.h"
-#include "dsp/circuit/Elements.h"
 
 #include <algorithm>
 #include <atomic>
@@ -200,7 +199,7 @@ void testControls()
     bool sections = eqOnly.size() == 12 && filtersOnly.size() == 4;
     for (size_t i = 0; sections && i < 12; ++i) sections = eqOnly[i].id == p[i + 4].id;
     for (size_t i = 0; sections && i < 4; ++i) sections = filtersOnly[i].id == p[i].id;
-    check (sections, "the sections for tests: EQ alone (the reference module's 12 controls), filters alone (4)");
+    check (sections, "the sections for tests: EQ alone (the analog-recreation module's 12 controls), filters alone (4)");
 }
 
 void testFlat()
@@ -328,7 +327,7 @@ void testBands()
 }
 
 /** A 1 kHz sine at peakDb through the card: gain and harmonics (2nd-5th) over its second half. */
-struct Tone { double gainDb, thdDb, outPeak; unsigned long failedSolves; };
+struct Tone { double gainDb, thdDb, outPeak; };
 Tone tone (double fs, const Settings& s, double peakDb)
 {
     auto m = makeSsl (fs, s);
@@ -336,7 +335,6 @@ Tone tone (double fs, const Settings& s, double peakDb)
     std::vector<float> x ((size_t) n);
     const double a = std::pow (10.0, peakDb / 20.0);
     for (int i = 0; i < n; ++i) x[(size_t) i] = (float) (a * std::sin (2.0 * kPi * 1000.0 * i / fs));
-    circuit::DeviceGroup::statFailures = 0;
     runMono (*m, x);
     Tone t {};
     std::complex<double> h[6] {};
@@ -349,7 +347,6 @@ Tone tone (double fs, const Settings& s, double peakDb)
     for (int k = 2; k <= 5; ++k) harmonics += std::norm (h[k]);
     t.gainDb = db (2.0 * std::abs (h[1]) / (n / 2) / a);
     t.thdDb = 10.0 * std::log10 (harmonics / std::norm (h[1]) + 1e-30);
-    t.failedSolves = circuit::DeviceGroup::statFailures;
     return t;
 }
 
@@ -363,8 +360,8 @@ void testLevel()
         const Tone clipped = tone (fs, {}, 12.0);
         check (std::abs (hot.gainDb - quiet.gainDb) < 0.01 && hot.thdDb < -100.0,
                fmt ("%.1f kHz, flat, 1 kHz: +4 dBFS in comes out like -20 dBFS (%.3f dB apart, < 0.01), harmonics %.0f dB (< -100)", fs / 1000.0, hot.gainDb - quiet.gainDb, hot.thdDb));
-        check (clipped.outPeak < 1.9 && clipped.thdDb > -40.0 && clipped.failedSolves == 0,
-               fmt ("%.1f kHz, flat, +12 dBFS in: clips at the rails, output peak %+.2f dBFS (16.5 V = +5.6 dBFS), harmonics %.0f dB, no failed solves", fs / 1000.0, db (clipped.outPeak), clipped.thdDb));
+        check (clipped.outPeak < 1.9 && clipped.thdDb > -40.0,
+               fmt ("%.1f kHz, flat, +12 dBFS in: clips at the rails, output peak %+.2f dBFS (16.5 V = +5.6 dBFS), harmonics %.0f dB", fs / 1000.0, db (clipped.outPeak), clipped.thdDb));
         const Settings filtersIn { { "hpf_on", 1.0f }, { "hpf_freq", 400.0f }, { "lpf_on", 1.0f }, { "lpf_freq", 3000.0f } };
         const Tone fQuiet = tone (fs, filtersIn, -20.0), fHot = tone (fs, filtersIn, 4.0);
         check (std::abs (fHot.gainDb - fQuiet.gainDb) < 0.01 && fHot.thdDb < -100.0,
@@ -385,7 +382,6 @@ void testModulation()
         std::uniform_real_distribution<float> unit (0.0f, 1.0f), noise (-0.25f, 0.25f);
         std::vector<float> x ((size_t) (3.0 * fs));
         for (auto& v : x) v = noise (rng);
-        circuit::DeviceGroup::statFailures = circuit::DeviceGroup::statIterations = circuit::DeviceGroup::statSolves = 0;
         for (size_t s = 0; s < x.size(); s += 32)
         {
             for (size_t i = 0; i < specs.size(); ++i)
@@ -400,10 +396,8 @@ void testModulation()
         bool finite = true;
         double peak = 0.0;
         for (float v : x) { finite = finite && std::isfinite (v); peak = std::max (peak, (double) std::abs (v)); }
-        check (finite && peak < 4.0 && circuit::DeviceGroup::statFailures == 0,
-               fmt ("%.1f kHz: every control (switches too) to a random value every 32 samples, -12 dBFS noise: finite, peak %.2f (< 4), %.0f failed solves, %.2f Newton iterations per solve",
-                    fs / 1000.0, peak, (double) circuit::DeviceGroup::statFailures,
-                    (double) circuit::DeviceGroup::statIterations / std::max (1.0, (double) circuit::DeviceGroup::statSolves)));
+        check (finite && peak < 4.0,
+               fmt ("%.1f kHz: every control (switches too) to a random value every 32 samples, -12 dBFS noise: finite, peak %.2f (< 4)", fs / 1000.0, peak));
     }
 
     // Two instances (a stereo pair) given the same signal render the same, bit for bit.
@@ -541,7 +535,7 @@ double worstDifference (const std::vector<float>& a, const std::vector<float>& b
 void testSwitches()
 {
     std::printf ("Switches\n");
-    // Both filters out: the card is the EQ alone (the reference module's netlist, bit for bit
+    // Both filters out: the card is the EQ alone (the analog-recreation module's netlist, bit for bit
     // the analog-recreation ssl_e242), whatever the filter knobs say.
     const std::vector<Settings> eqSets { {}, { { "hf_gain", 18.0f }, { "hf_freq", 10000.0f }, { "hf_bell", 1.0f } }, { { "lf_gain", 16.0f }, { "lf_freq", 100.0f } },
                                          { { "hf_gain", 8.0f }, { "hmf_gain", -6.0f }, { "hmf_q", 3.0f }, { "lmf_gain", 5.0f }, { "lf_gain", 10.0f }, { "lf_bell", 1.0f } } };
@@ -632,7 +626,6 @@ void testSilence()
         std::uniform_real_distribution<float> loud (-2.0f, 2.0f);
         std::vector<float> burst ((size_t) (0.5 * fs));
         for (auto& v : burst) v = loud (rng);
-        circuit::DeviceGroup::statFailures = 0;
         runMono (*m, burst);
         bool finite = true;
         double firstSecond = 0.0, lastSecond = 0.0, lastPeak = 0.0;
@@ -650,8 +643,8 @@ void testSilence()
         }
         check (finite && lastPeak < 1e-4 && lastSecond < 3.0 * firstSecond,
                fmt ("%.0f kHz, every band +18, filters in, 0.5 s of +6 dBFS noise then 10 s of silence: finite, last second's peak %.2g (< 1e-4), "
-                    "last second took %.2fx the first's CPU (< 3: no denormal slow-down), %.0f failed solves",
-                    fs / 1000.0, lastPeak, lastSecond / firstSecond, (double) circuit::DeviceGroup::statFailures));
+                    "last second took %.2fx the first's CPU (< 3: no denormal slow-down)",
+                    fs / 1000.0, lastPeak, lastSecond / firstSecond));
     }
 }
 
@@ -716,10 +709,10 @@ void testDynamics()
     check (gated[0] < -35.0 && gated[3] > 35.0 && expanded[0] > gated[0] + 15.0,
            fmt ("gate reaches %.2f dB (meter %.2f); 2:1 expander is gentler at %.2f dB", gated[0], gated[3], expanded[0]));
 
-    const auto attackSeconds = [sampleRate = fs] (bool fast)
+    const auto attackSeconds = [] (bool fast)
     {
         fx::SslE10Dynamics dynamics;
-        dynamics.prepare (sampleRate);
+        dynamics.prepare (fs);
         fx::SslE10Settings s;
         s.enabled = true;
         s.automaticMakeup = false;
@@ -727,12 +720,12 @@ void testDynamics()
         s.compressorRatio = 20.0f;
         s.compressorFastAttack = fast;
         dynamics.setSettings (s);
-        for (int i = 0; i < (int) (0.5 * sampleRate); ++i)
+        for (int i = 0; i < (int) (0.5 * fs); ++i)
         {
-            float x = 0.5f * std::sin ((float) (2.0 * kPi * 1000.0 * i / sampleRate));
+            float x = 0.5f * std::sin ((float) (2.0 * kPi * 1000.0 * i / fs));
             dynamics.process (&x, nullptr, &x, nullptr, 1);
             if (dynamics.compressorGainReductionDb() >= 10.0f)
-                return i / sampleRate;
+                return i / fs;
         }
         return 0.5;
     };
@@ -740,6 +733,28 @@ void testDynamics()
     check (fastAttack < autoAttack * 0.5 && fastAttack < 0.010 && autoAttack > 0.010,
            fmt ("R21/C5 AUTO reaches 10 dB GR in %.2f ms; R19/C5 FAST in %.2f ms",
                 autoAttack * 1000.0, fastAttack * 1000.0));
+}
+
+//== The clippers ===============================================================================
+void testClippers()
+{
+    std::printf ("Clippers (the op-amps' linear limit)\n");
+    // The clippers: an exact pass-through below the op-amps' linear limit, an overload report above it.
+    for (double fs : kRates)
+    {
+        auto m = makeSsl (fs, {});
+        const auto driven = [&] (double dbfs)
+        {
+            std::vector<float> x ((size_t) fs);
+            for (size_t i = 0; i < x.size(); ++i) x[i] = (float) (std::pow (10.0, dbfs / 20.0) * std::sin (2.0 * kPi * 1000.0 * (double) i / fs));
+            m->takeOverloadVolts();
+            runMono (*m, x);
+            return m->takeOverloadVolts();
+        };
+        const float quiet = driven (4.0), loud = driven (8.0);
+        check (quiet == 0.0f && loud > 0.9f * 14.85f && loud < 1.01f * std::pow (10.0, 8.0 / 20.0) * fx::kSslVoltsPerFullScale,
+               fmt ("%.1f kHz: +4 dBFS (flat) never reaches the clippers (report %.2f V); +8 dBFS reports %.2f V (peak 21.9 V at the card, over 14.85 V)", fs / 1000.0, (double) quiet, (double) loud));
+    }
 }
 
 void testCpu()
@@ -776,6 +791,8 @@ int main (int argc, char** argv)
     }
     testFilters();
     testSwitches();
+    if (! quick)
+        testClippers();
     testDynamics();
     testSilence();
     if (! quick)

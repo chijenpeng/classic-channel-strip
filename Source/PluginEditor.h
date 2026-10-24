@@ -99,6 +99,22 @@ private:
     int holdTicks = 0;
 };
 
+/** A flat lamp that lights when the card's op-amps go past their linear limit, and holds for about
+    a second. While lit it reads the largest level reached at the card, in dBFS. */
+class OverloadLamp final : public juce::Component
+{
+public:
+    OverloadLamp();
+    /** What Ssl4000EqProcessor::takeCardOverload() returned (-120 when the card stayed linear);
+        call at LevelMeter::kRateHz. */
+    void push (float cardDbfs);
+    void paint (juce::Graphics&) override;
+
+private:
+    float heldDb = -120.0f;
+    int holdTicks = 0;
+};
+
 /** Compressor gain reduction on the sibling 1176 VU face, with a numeric GR readout. */
 class ReductionMeter final : public juce::Component
 {
@@ -143,6 +159,7 @@ private:
     Knob lfGain, lfFreq, lmfGain, lmfFreq, lmfQ;
     Knob input, output;
     LevelMeter inputMeter, outputMeter;
+    OverloadLamp overloadLamp;
     OptionRow dynOn, compFast, compMakeup, dynPosition, sidechainSource;
     Knob compThreshold, compRatio, compRelease;
     ReductionMeter reductionMeter;

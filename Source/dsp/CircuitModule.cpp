@@ -7,7 +7,7 @@ namespace ar::fx
 {
 void CircuitModule::prepare (double sampleRate)
 {
-    circ = circuit::Circuit();
+    circ = makeCircuit();
     std::vector<float> oldTargets;
     oldTargets.reserve (parameters.size());
     for (const auto& parameter : parameters)
@@ -21,8 +21,7 @@ void CircuitModule::prepare (double sampleRate)
     for (size_t i = 0; i < parameters.size() && i < oldTargets.size(); ++i)
         parameters[i].target = oldTargets[i];
 
-    circ.setMergeGroups (mergeGroups());
-    circ.prepare (sampleRate);
+    circ->prepare (sampleRate);
     reset();
 }
 
@@ -35,9 +34,18 @@ void CircuitModule::reset()
         parameter.current = parameter.target;
         parameter.apply (parameter.current);
     }
-    circ.refactorIfNeeded();
-    circ.findOperatingPoint();
+    settle();
     controlCountdown = 0;
+}
+
+void CircuitModule::settle()
+{
+    circ->refactorIfNeeded();
+}
+
+void CircuitModule::controlsChanged()
+{
+    circ->refactorIfNeeded();
 }
 
 int CircuitModule::addParam (ParamSpec spec, std::function<void (float)> apply, bool smooth)
@@ -64,6 +72,11 @@ void CircuitModule::setParam (int index, float value)
 }
 
 void CircuitModule::process (float* samples, int numSamples)
+{
+    processChunks (samples, nullptr, numSamples);
+}
+
+void CircuitModule::processChunks (float* a, float* b, int numSamples)
 {
     if (! built)
         return;
@@ -93,13 +106,12 @@ void CircuitModule::process (float* samples, int numSamples)
                 changed = true;
             }
             if (changed)
-                circ.refactorIfNeeded();
+                controlsChanged();
             controlCountdown = kControlInterval;
         }
 
         const int n = std::min (numSamples - i, controlCountdown);
-        for (int k = 0; k < n; ++k)
-            samples[i + k] = (float) circ.process ((circuit::Real) samples[i + k]) * outputGain;
+        renderChunk (a + i, b != nullptr ? b + i : nullptr, n);
         i += n;
         controlCountdown -= n;
     }

@@ -71,6 +71,7 @@ float parallel (float a, float b) noexcept
 void SslE10Dynamics::prepare (double sampleRate) noexcept
 {
     fs = std::max (1.0, sampleRate);
+    updateCoefficients();
     reset();
 }
 
@@ -94,24 +95,46 @@ float SslE10Dynamics::onePole (float seconds) const noexcept
     return std::exp (-1.0f / (std::max (1.0e-8f, seconds) * (float) fs));
 }
 
-float SslE10Dynamics::detectorVolts (Ad536& detector, float sample) const noexcept
+float SslE10Dynamics::detectorRms (Ad536& detector, float sample) const noexcept
 {
     // C1, R2 and the AD536J's measured input resistance form the card's sidechain high-pass.
     const float inputVolts = sample * kSslVoltsPerFullScale;
-    const float inputTau = (kR2 + kAd536InputOhms) * kC1;
-    const float hp = inputTau / (inputTau + 1.0f / (float) fs);
-    detector.highPass = hp * (detector.highPass + inputVolts - detector.inputPrevious);
+    detector.highPass = k.detectorHighPass * (detector.highPass + inputVolts - detector.inputPrevious);
     detector.inputPrevious = inputVolts;
 
     // AD536J macromodel. Its data sheet gives 25 ms/uF for CAV. C2 is 3n3 on the drawing.
-    const float averagingSeconds = kAd536MsPerMicrofarad * (kC2 * 1.0e6f);
-    const float a = onePole (averagingSeconds);
     const float square = detector.highPass * detector.highPass;
-    detector.meanSquare = clampTiny (a * detector.meanSquare + (1.0f - a) * square);
+    detector.meanSquare = clampTiny (k.detectorAverage * detector.meanSquare + (1.0f - k.detectorAverage) * square);
+    return std::sqrt (std::max (detector.meanSquare, 1.0e-16f));
+}
 
-    const float rms = std::sqrt (std::max (detector.meanSquare, 1.0e-16f));
+float SslE10Dynamics::detectorVolts (float rms) const noexcept
+{
     // VR1/R4/R6 and T2 set 0 dB to 0.7746 Vrms; R7-R12 scale the dB pin to 100 mV/dB.
     return kDetectorVoltsPerDb * (20.0f * std::log10 (rms / 0.7746f));
+}
+
+void SslE10Dynamics::updateCoefficients() noexcept
+{
+    const float inputTau = (kR2 + kAd536InputOhms) * kC1;
+    k.detectorHighPass = inputTau / (inputTau + 1.0f / (float) fs);
+    k.detectorAverage = onePole (kAd536MsPerMicrofarad * (kC2 * 1.0e6f));
+    const float tauIn = kR79 * kC10;
+    k.inputHighPass = tauIn / (tauIn + 1.0f / (float) fs);
+    k.outputLowPass = onePole (kR81 * kC12);
+    const float effectiveC = 1.0f / (1.0f / kC13 + 1.0f / kC14);
+    const float tau = kR85 * effectiveC;
+    k.outputHighPass = tau / (tau + 1.0f / (float) fs);
+
+    const float attackR = settings.compressorFastAttack ? kR19 : kR21;
+    k.attack5 = onePole (attackR * kC5);
+    k.attack6 = onePole ((attackR + kR22) * kC6);
+    // The front-panel seconds are the 90% recovery of the C6 leg. Inverting that scale
+    // gives the resistance of the 250 k log release pot; R23 and corrected R22 remain in it.
+    const float wantedTau = std::max (0.001f, settings.compressorReleaseSeconds / 2.3025851f);
+    const float releaseR = std::clamp (wantedTau / kC6 - kR23 - kR22, 0.0f, kCompReleasePot);
+    k.release6 = onePole ((kR23 + kR22 + releaseR) * kC6);
+    k.release5 = onePole ((kR23 + releaseR) * kC5);
 }
 
 float SslE10Dynamics::diodeKneeVolts (float overVolts) noexcept
@@ -173,26 +196,16 @@ float SslE10Dynamics::gateTargetVolts (float levelVolts) noexcept
 
 float SslE10Dynamics::updateCompressorTiming (float targetVolts) noexcept
 {
-    const float attackR = settings.compressorFastAttack ? kR19 : kR21;
     if (targetVolts > compressorC5)
     {
-        const float a5 = onePole (attackR * kC5);
-        const float a6 = onePole ((attackR + kR22) * kC6);
-        compressorC5 = a5 * compressorC5 + (1.0f - a5) * targetVolts;
-        compressorC6 = a6 * compressorC6 + (1.0f - a6) * targetVolts;
+        compressorC5 = k.attack5 * compressorC5 + (1.0f - k.attack5) * targetVolts;
+        compressorC6 = k.attack6 * compressorC6 + (1.0f - k.attack6) * targetVolts;
     }
     else
     {
-        // The front-panel seconds are the 90% recovery of the C6 leg. Inverting that scale
-        // gives the resistance of the 250 k log release pot; R23 and corrected R22 remain in it.
-        const float wantedTau = std::max (0.001f, settings.compressorReleaseSeconds / 2.3025851f);
-        const float releaseR = std::clamp (wantedTau / kC6 - kR23 - kR22,
-                                           0.0f, kCompReleasePot);
-        const float a6 = onePole ((kR23 + kR22 + releaseR) * kC6);
-        compressorC6 = a6 * compressorC6 + (1.0f - a6) * targetVolts;
+        compressorC6 = k.release6 * compressorC6 + (1.0f - k.release6) * targetVolts;
         const float heldTarget = std::max (targetVolts, compressorC6);
-        const float a5 = onePole ((kR23 + releaseR) * kC5);
-        compressorC5 = a5 * compressorC5 + (1.0f - a5) * heldTarget;
+        compressorC5 = k.release5 * compressorC5 + (1.0f - k.release5) * heldTarget;
     }
     compressorC5 = clampTiny (compressorC5);
     compressorC6 = clampTiny (compressorC6);
@@ -239,7 +252,7 @@ float SslE10Dynamics::outputStage (AudioPath& path, float inputVolts) const noex
 {
     // T9 NE5534: R81 || C12. The DBX current-output polarity makes the complete stage
     // non-inverting. Its finite rails are the same +/-18 V 5534 model used by the EQ card.
-    const float a = onePole (kR81 * kC12);
+    const float a = k.outputLowPass;
     path.outputLowPass = a * path.outputLowPass + (1.0f - a) * inputVolts;
     float v = path.outputLowPass;
     const float magnitude = std::abs (v);
@@ -251,10 +264,7 @@ float SslE10Dynamics::outputStage (AudioPath& path, float inputVolts) const noex
     }
 
     // C13/C14 are back-to-back 220 uF (110 uF effective), R85 is the 10 k output load.
-    const float effectiveC = 1.0f / (1.0f / kC13 + 1.0f / kC14);
-    const float tau = kR85 * effectiveC;
-    const float hp = tau / (tau + 1.0f / (float) fs);
-    path.outputHighPass = hp * (path.outputHighPass + v - path.outputHighPassInput);
+    path.outputHighPass = k.outputHighPass * (path.outputHighPass + v - path.outputHighPassInput);
     path.outputHighPassInput = v;
     return path.outputHighPass * (kR85 / (kR84 + kR85));
 }
@@ -271,6 +281,7 @@ void SslE10Dynamics::process (float* left, float* right, const float* sideLeft,
         return;
     }
 
+    updateCoefficients();
     const float ratio = settings.compressorRatio >= 19.5f ? 1000.0f
                                                           : std::max (1.0f, settings.compressorRatio);
     const float ratioTravel = 1.0f - 1.0f / ratio;
@@ -285,9 +296,7 @@ void SslE10Dynamics::process (float* left, float* right, const float* sideLeft,
     {
         // C10 sees R79's virtual-ground input. R78 is on the driven side of C10, so the
         // motherboard's ideal low-impedance drive makes it a load, not part of this pole.
-        const float tau = kR79 * kC10;
-        const float hp = tau / (tau + 1.0f / (float) fs);
-        path.inputHighPass = hp * (path.inputHighPass + sample - path.inputHighPassInput);
+        path.inputHighPass = k.inputHighPass * (path.inputHighPass + sample - path.inputHighPassInput);
         path.inputHighPassInput = sample;
         return path.inputHighPass;
     };
@@ -298,13 +307,17 @@ void SslE10Dynamics::process (float* left, float* right, const float* sideLeft,
         const float sl = sideLeft != nullptr ? sideLeft[i] : left[i];
         const float sr = sideRight != nullptr ? sideRight[i]
                                                : (right != nullptr ? right[i] : sl);
-        const float levelLeft = detectorVolts (detectors[0], sl);
-        const float levelRight = detectorVolts (detectors[1], sr);
-        // SW2 and D27 link the command buses; the card asking for more attenuation wins.
-        const float levelVolts = std::max (levelLeft, levelRight);
+        const float rmsLeft = detectorRms (detectors[0], sl);
+        const float rmsRight = detectorRms (detectors[1], sr);
+        // SW2 and D27 link the command buses; the card asking for more attenuation wins (the dB
+        // law is monotonic, so the larger rms is the larger level: one log per sample, not two).
+        const float levelVolts = detectorVolts (std::max (rmsLeft, rmsRight));
 
         const float compVolts = updateCompressorTiming (compressorTargetVolts (levelVolts));
-        const float gateVolts = updateGateTiming (gateTargetVolts (levelVolts));
+        // The plug-in never opens the gate's range (0 dB), so its comparator and timing network sit at
+        // zero: skipped while they are (settings.gateRangeDb > 0 still runs them, as the tests do).
+        const bool gateIdle = settings.gateRangeDb == 0.0f && gateC9 == 0.0f;
+        const float gateVolts = gateIdle ? 0.0f : updateGateTiming (gateTargetVolts (levelVolts));
         const float commandVolts = compVolts + gateVolts - makeupVolts;
 
         float l = dbx2151 (inputCoupling (audioPaths[0], left[i] * kSslVoltsPerFullScale), commandVolts);

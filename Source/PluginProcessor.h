@@ -75,6 +75,11 @@ public:
     float takeOutputPeak (int channel) noexcept;
     /** Peak gain reduction since the last call, in positive dB. */
     float takeCompressorReduction() noexcept { return compressorReduction.exchange (0.0f); }
+    /** The largest level that reached the card's op-amp clippers (the section outputs) above their
+        linear limit (+-14.85 V = +4.6 dBFS at the card) since the last call, in dBFS at the card
+        (after the Input trim, the filters' and bands' gain included); -120 when the card stayed
+        linear. Lock-free; for a clip indicator. Does not affect the audio. */
+    float takeCardOverload() noexcept;
     /** The oversampling factor the audio thread runs (1 or 2). */
     int getActiveOversampling() const noexcept { return requested.load() == 1 ? 2 : 1; }
 
@@ -131,6 +136,7 @@ private:
     std::array<std::vector<float>, 2> sidechainScratch;
     std::array<std::atomic<float>, 2> inputPeak {}, outputPeak {};
     std::atomic<float> compressorReduction { 0.0f };
+    std::atomic<float> cardOverloadVolts { 0.0f };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Ssl4000EqProcessor)
 };

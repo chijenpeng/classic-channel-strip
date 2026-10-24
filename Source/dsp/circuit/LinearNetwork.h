@@ -13,6 +13,16 @@ enum class Taper { linear, audio, reverseAudio };
 
 Real taperFraction (Taper taper, Real position) noexcept;
 
+/** The discrete-time state space of a network without devices (see LinearNetwork::extractStateSpace):
+    s[n+1] = A s[n] + B u[n], y[n] = C s[n] + D u[n]. The states are the capacitors' trapezoidal
+    companion histories; g holds each one's companion conductance (what a warp change rescales). */
+struct StateSpace
+{
+    int n = 0;
+    std::vector<double> A, B, C, g;   // A is n x n, row-major
+    double D = 0.0;
+};
+
 /** A linear sub-circuit solved by modified nodal analysis with the trapezoidal rule.
 
     Nodes are created by name (node 0 is ground). Components stamp conductances; capacitors and
@@ -20,10 +30,10 @@ Real taperFraction (Taper taper, Real position) noexcept;
     changed at run time; a pot or switch change refactors the matrix, a source change only
     touches the right-hand side.
 
-    Non-linear devices connect through *ports*: a port is a node into which an external current
-    is injected. The network exposes, for the current sample, the affine relation
+    An external element connects through a *port*: a node into which it injects a current. The
+    network exposes, for the current sample, the affine relation
         v[port] = v0[port] + sum_q R[port][q] * i[q]
-    so a device can solve for its own currents with Newton's method, then hand them back. */
+    so that element can solve for its own currents, then hand them back. */
 class LinearNetwork
 {
 public:
@@ -112,6 +122,14 @@ public:
     void setComputeAllNodes (bool) noexcept {}
     std::string describe() const;
 
+    /** Exact discrete state space of this network as it is now (devices must be absent, ports
+        unused): input = the voltage source `inputSource`, output = the voltage at `outputNode`,
+        states = every enabled capacitor's companion history. It is the same recursion as
+        beginSample / endSample run N + 1 times on unit histories, so a system stepped with it
+        is the sample-by-sample solver's own output. Refactors first if needed. Allocation-free
+        once `ss` has been filled once for a network of this size (call it from prepare time). */
+    void extractStateSpace (int inputSource, int outputNode, StateSpace& ss);
+
 private:
     struct Resistor { int a, b; Real ohms; };
     struct Capacitor { int a, b; Real farads, g = 0, hist = 0, vPrev = 0; bool enabled = true; Real warpHz = 0; };
@@ -167,6 +185,8 @@ private:
     std::vector<Real> rhsFull, x;                    // full layout: right-hand side, solution
     std::vector<Real> xh, xr;                        // reduced: ports open, final
     mutable std::vector<Real> scratch;
+    std::vector<int> stateCaps;                      // extractStateSpace(): the enabled capacitors
+    std::vector<Real> savedSources, savedHist;
     std::vector<Real> portScratch;   // rebuildPortResponses()' right-hand side, sized in prepare()
     std::vector<Real> portZ;      // per port: dim-vector response to unit injected current
     std::vector<Real> portR;      // numPorts x numPorts

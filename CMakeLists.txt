@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(ClassicChannelStrip VERSION 0.1.0 LANGUAGES C CXX)
+project(ClassicChannelStrip VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,7 +23,8 @@ else()
     FetchContent_MakeAvailable(JUCE)
 endif()
 
-# The card model has no JUCE dependency, so its circuit regression suite runs offline.
+# The card model (a state space extracted from the schematic netlist) has no JUCE dependency, so its
+# regression suite runs offline.
 file(GLOB_RECURSE CLASSIC_CHANNEL_DSP_SOURCES CONFIGURE_DEPENDS Source/dsp/*.cpp)
 add_library(classic_channel_dsp STATIC ${CLASSIC_CHANNEL_DSP_SOURCES})
 target_include_directories(classic_channel_dsp PUBLIC Source)

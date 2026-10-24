@@ -180,6 +180,10 @@ public:
     virtual bool hasGainReductionMeter() const { return false; }
     /** The largest gain reduction (dB, 0 or more) during the last process() call. */
     virtual float gainReductionDb() const { return 0.0f; }
+    /** Modules with a clipper (the SSL card): the largest voltage that reached it above its linear
+        limit since the last call, in volts at the module (0 when it stayed linear). Reading
+        resets it. Lock-free; any thread. */
+    virtual float takeOverloadVolts() noexcept { return 0.0f; }
 };
 
 using ModulePtr = std::unique_ptr<Module>;

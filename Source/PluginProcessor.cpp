@@ -181,24 +181,20 @@ void Ssl4000EqProcessor::prepareEngines (double sampleRate, int samplesPerBlock)
     preparedChannels = juce::jlimit (1, 2, juce::jmax (getMainBusNumInputChannels(), getMainBusNumOutputChannels()));
     maxBlock = juce::jmax (1, samplesPerBlock);
 
-    // Both factors, ready to run: switching between them never builds on the audio thread.
+    // Both factors, ready to run: switching between them never builds on the audio thread. A stereo
+    // instance has one card (and one key-path card per section) holding both channels, which share
+    // the state-space matrices; a mono one has a one-channel card.
     for (auto& e : engines)
     {
-        for (auto& card : e.cards)
+        const auto fill = [&] (std::array<ar::ModulePtr, 2>& cards, ar::fx::SslSections sections)
         {
-            card = ar::fx::makeSslE242();
-            card->prepare (sampleRate * e.factor);
-        }
-        for (auto& card : e.sidechainFilters)
-        {
-            card = ar::fx::makeSslE242 (ar::fx::SslSections::filtersOnly);
-            card->prepare (sampleRate * e.factor);
-        }
-        for (auto& card : e.sidechainEq)
-        {
-            card = ar::fx::makeSslE242 (ar::fx::SslSections::eqOnly);
-            card->prepare (sampleRate * e.factor);
-        }
+            cards[0] = ar::fx::makeSslE242 (sections, preparedChannels);
+            cards[0]->prepare (sampleRate * e.factor);
+            cards[1].reset();
+        };
+        fill (e.cards, ar::fx::SslSections::all);
+        fill (e.sidechainFilters, ar::fx::SslSections::filtersOnly);
+        fill (e.sidechainEq, ar::fx::SslSections::eqOnly);
         e.dynamics.prepare (sampleRate * e.factor);
     }
     oversampler = std::make_unique<juce::dsp::Oversampling<float>> ((size_t) preparedChannels, 1,
@@ -236,9 +232,9 @@ void Ssl4000EqProcessor::resetEngine (int index)
     auto& e = engines[(size_t) index];
     for (int i = 0; i < kModuleParams; ++i)
         setModuleParameter (e, i, moduleParams[(size_t) i]->load());
-    for (auto& card : e.cards) card->reset();
-    for (auto& card : e.sidechainFilters) card->reset();
-    for (auto& card : e.sidechainEq) card->reset();
+    e.cards[0]->reset();
+    e.sidechainFilters[0]->reset();
+    e.sidechainEq[0]->reset();
     e.dynamics.reset();
     e.sent.fill (std::numeric_limits<float>::quiet_NaN());   // pushParameters() sends everything again
     if (index == 1 && oversampler != nullptr)
@@ -247,15 +243,12 @@ void Ssl4000EqProcessor::resetEngine (int index)
 
 void Ssl4000EqProcessor::setModuleParameter (Engine& e, int index, float value) noexcept
 {
-    for (auto& card : e.cards)
-        card->setParam (index, value);
+    e.cards[0]->setParam (index, value);
 
     if (index < ar::fx::kSslFilterParamCount)
-        for (auto& card : e.sidechainFilters)
-            card->setParam (index, value);
+        e.sidechainFilters[0]->setParam (index, value);
     else if (index < ar::fx::kSslEqEnabledParamIndex)
-        for (auto& card : e.sidechainEq)
-            card->setParam (index - ar::fx::kSslEqParamOffset, value);
+        e.sidechainEq[0]->setParam (index - ar::fx::kSslEqParamOffset, value);
 }
 
 void Ssl4000EqProcessor::updateOversampling()
@@ -379,18 +372,23 @@ void Ssl4000EqProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
                             if (scRight != nullptr) scRight[i] = sourceRight[i];
                         }
                     }
+                    const auto runKey = [&] (ar::Module& card)
+                    {
+                        if (channels > 1) card.processStereo (sidechainScratch[0].data(), sidechainScratch[1].data(), internalLength);
+                        else              card.process (sidechainScratch[0].data(), internalLength);
+                    };
                     if (sidechainChoice == 1)
-                        for (int ch = 0; ch < channels; ++ch) engine.sidechainFilters[(size_t) ch]->process (sidechainScratch[(size_t) ch].data(), internalLength);
+                        runKey (*engine.sidechainFilters[0]);
                     else if (sidechainChoice == 2 && moduleParams[16]->load (std::memory_order_relaxed) > 0.5f)
-                        for (int ch = 0; ch < channels; ++ch) engine.sidechainEq[(size_t) ch]->process (sidechainScratch[(size_t) ch].data(), internalLength);
+                        runKey (*engine.sidechainEq[0]);
                 }
                 engine.dynamics.process (left, right, scLeft, scRight, internalLength);
             };
 
             if (! postEq)
                 makeSidechain (left, right);
-            engine.cards[0]->process (left, internalLength);
-            if (right != nullptr) engine.cards[1]->process (right, internalLength);
+            if (right != nullptr) engine.cards[0]->processStereo (left, right, internalLength);
+            else                  engine.cards[0]->process (left, internalLength);
             if (postEq)
                 makeSidechain (left, right);
         };
@@ -412,8 +410,15 @@ void Ssl4000EqProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
         for (float old = held.load (std::memory_order_relaxed); value > old && ! held.compare_exchange_weak (old, value);) {}
     };
     holdReduction (compressorReduction, engine.dynamics.compressorGainReductionDb());
+    holdReduction (cardOverloadVolts, engine.cards[0]->takeOverloadVolts());
 
     holdPeaks (outputPeak);
+}
+
+float Ssl4000EqProcessor::takeCardOverload() noexcept
+{
+    const float volts = cardOverloadVolts.exchange (0.0f);
+    return volts > 0.0f ? juce::Decibels::gainToDecibels (volts / ar::fx::kSslVoltsPerFullScale) : -120.0f;
 }
 
 float Ssl4000EqProcessor::takeInputPeak (int channel) noexcept

@@ -59,7 +59,10 @@ private:
 
     static float gainFromDb (float db) noexcept;
     float onePole (float seconds) const noexcept;
-    float detectorVolts (Ad536& detector, float sample) const noexcept;
+    /** The detector up to the mean square's root (volts rms); detectorVolts() turns the larger of
+        the two channels' into the dB command voltage once per sample. */
+    float detectorRms (Ad536& detector, float sample) const noexcept;
+    float detectorVolts (float rms) const noexcept;
     static float diodeKneeVolts (float overVolts) noexcept;
     float dbx2151 (float inputVolts, float controlVolts) const noexcept;
     float outputStage (AudioPath& path, float inputVolts) const noexcept;
@@ -67,6 +70,16 @@ private:
     float gateTargetVolts (float levelVolts) noexcept;
     float updateCompressorTiming (float targetVolts) noexcept;
     float updateGateTiming (float targetVolts) noexcept;
+
+    /** The one-pole coefficients that depend only on the rate and the settings: computed once per
+        process() call instead of an exp() in every sample. */
+    struct Coefficients
+    {
+        float detectorHighPass = 0, detectorAverage = 0, inputHighPass = 0, outputLowPass = 0, outputHighPass = 0;
+        float attack5 = 0, attack6 = 0, release6 = 0, release5 = 0;
+    };
+    void updateCoefficients() noexcept;
+    Coefficients k;
 
     SslE10Settings settings;
     double fs = 48000.0;

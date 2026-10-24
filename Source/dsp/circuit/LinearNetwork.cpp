@@ -206,6 +206,9 @@ void LinearNetwork::prepare (Real sampleRate)
     xr.assign ((size_t) dim, 0.0);
     scratch.assign ((size_t) dim, 0.0);
     portScratch.assign ((size_t) dim, 0.0);
+    stateCaps.reserve (capacitors.size());
+    savedSources.assign (sources.size(), 0.0);
+    savedHist.assign (capacitors.size(), 0.0);
     // A refactor (a pot or switch moving, on the audio thread) must not allocate: room for the
     // densest factors and couplings it can produce.
     const size_t triangle = (size_t) dim * (size_t) dim / 2 + (size_t) dim;
@@ -538,6 +541,55 @@ void LinearNetwork::beginSample()
     for (const auto& c : couplings)
         r[c.row] -= c.g * sources[(size_t) c.source].volts;
     solveInPlace (xh);
+}
+
+void LinearNetwork::extractStateSpace (int inputSource, int outputNode, StateSpace& ss)
+{
+    refactorIfNeeded();
+    stateCaps.clear();
+    for (size_t i = 0; i < capacitors.size(); ++i)
+        if (capacitors[i].enabled)
+            stateCaps.push_back ((int) i);
+    const int n = (int) stateCaps.size();
+    ss.n = n;
+    ss.A.assign ((size_t) n * (size_t) n, 0.0);
+    ss.B.assign ((size_t) n, 0.0);
+    ss.C.assign ((size_t) n, 0.0);
+    ss.g.assign ((size_t) n, 0.0);
+
+    for (size_t k = 0; k < sources.size(); ++k) { savedSources[k] = sources[k].volts; sources[k].volts = 0.0; }
+    for (size_t i = 0; i < capacitors.size(); ++i) { savedHist[i] = capacitors[i].hist; capacitors[i].hist = 0.0; }
+
+    const auto capVoltage = [this] (const Capacitor& c) { return openNodeVoltage (c.a) - openNodeVoltage (c.b); };
+    // Column k of the capacitor-voltage map and the output row: the response to a unit history in k.
+    for (int k = 0; k < n; ++k)
+    {
+        capacitors[(size_t) stateCaps[(size_t) k]].hist = 1.0;
+        beginSample();
+        for (int i = 0; i < n; ++i)
+            ss.A[(size_t) i * (size_t) n + (size_t) k] = capVoltage (capacitors[(size_t) stateCaps[(size_t) i]]);
+        ss.C[(size_t) k] = openNodeVoltage (outputNode);
+        capacitors[(size_t) stateCaps[(size_t) k]].hist = 0.0;
+    }
+    sources[(size_t) inputSource].volts = 1.0;
+    beginSample();
+    for (int i = 0; i < n; ++i)
+        ss.B[(size_t) i] = capVoltage (capacitors[(size_t) stateCaps[(size_t) i]]);
+    ss.D = openNodeVoltage (outputNode);
+
+    // hist' = -(2 g v + hist) with v = W hist + w u.
+    for (int i = 0; i < n; ++i)
+    {
+        const Real g = capacitors[(size_t) stateCaps[(size_t) i]].g;
+        ss.g[(size_t) i] = g;
+        for (int k = 0; k < n; ++k)
+            ss.A[(size_t) i * (size_t) n + (size_t) k] *= -2.0 * g;
+        ss.A[(size_t) i * (size_t) n + (size_t) i] -= 1.0;
+        ss.B[(size_t) i] *= -2.0 * g;
+    }
+
+    for (size_t k = 0; k < sources.size(); ++k) sources[k].volts = savedSources[k];
+    for (size_t i = 0; i < capacitors.size(); ++i) capacitors[i].hist = savedHist[i];
 }
 
 Real LinearNetwork::sourceCurrent (int k) const noexcept

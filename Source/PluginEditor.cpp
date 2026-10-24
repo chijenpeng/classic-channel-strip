@@ -388,6 +388,43 @@ void LevelMeter::paint (juce::Graphics& g)
 }
 
 //==============================================================================
+OverloadLamp::OverloadLamp() = default;
+
+void OverloadLamp::push (float cardDbfs)
+{
+    constexpr int holdFor = LevelMeter::kRateHz;   // 1 s
+    const bool wasLit = holdTicks > 0;
+    const float before = heldDb;
+    if (cardDbfs > -119.0f)
+    {
+        heldDb = wasLit ? juce::jmax (heldDb, cardDbfs) : cardDbfs;
+        holdTicks = holdFor;
+    }
+    else if (holdTicks > 0)
+        --holdTicks;
+
+    if (wasLit != (holdTicks > 0) || std::abs (heldDb - before) > 0.05f)
+        repaint();
+}
+
+void OverloadLamp::paint (juce::Graphics& g)
+{
+    // A flat segment on the bars' row; lit in the clipping red, with the peak it reached at the card.
+    constexpr float width = 14.0f, thickness = 6.0f;
+    const bool lit = holdTicks > 0;
+    const auto r = getLocalBounds().toFloat();
+    const auto lamp = r.withSizeKeepingCentre (width, thickness).withX (r.getX());
+    g.setColour (lit ? Theme::clipping : Theme::label.withAlpha (0.25f));
+    g.fillRect (lamp);
+    if (lit)
+    {
+        g.setColour (Theme::clipping);
+        g.setFont (Theme::valueFont());
+        g.drawText (dbText (heldDb).replace (" dB", " dBFS"), r.withTrimmedLeft (width + 8.0f).toNearestInt(), juce::Justification::centredLeft, false);
+    }
+}
+
+//==============================================================================
 ReductionMeter::ReductionMeter() = default;
 
 void ReductionMeter::push (float compressorDb)
@@ -509,7 +546,7 @@ EditorView::EditorView (Ssl4000EqProcessor& p)
     for (auto* c : std::initializer_list<juce::Component*> { &oversample, &hpfOn, &lpfOn, &eqOn, &hfShape, &lfShape,
                                                              &hpfFreq, &lpfFreq, &hfGain, &hfFreq, &hmfGain, &hmfFreq, &hmfQ,
                                                              &lfGain, &lfFreq, &lmfGain, &lmfFreq, &lmfQ, &input, &output,
-                                                             &inputMeter, &outputMeter, &dynOn, &compFast, &compMakeup,
+                                                             &inputMeter, &outputMeter, &overloadLamp, &dynOn, &compFast, &compMakeup,
                                                              &dynPosition, &sidechainSource, &compThreshold, &compRatio, &compRelease,
                                                              &reductionMeter })
         addAndMakeVisible (c);
@@ -531,6 +568,9 @@ EditorView::EditorView (Ssl4000EqProcessor& p)
                                         "marked. It rises at once and falls at about 20 dB/s; the held peak turns red at or above 0 dBFS.");
     setHelp (outputMeter, "Output level", "The channel output in dBFS, after the Output trim: a flat bar from -40 to +6 dBFS with "
                                           "0 dBFS marked. It rises at once and falls at about 20 dB/s; the held peak turns red at or above 0 dBFS.");
+    setHelp (overloadLamp, "Card overload", "Lights when an op-amp in the card goes past its linear limit (+-14.85 V, which is +4.6 dBFS at the card "
+                                            "with the EQ flat; boosts lower it) and holds for about a second, reading the peak it reached. "
+                                            "Turn Input down to stay clean.");
     setHelp (reductionMeter, "Gain reduction", "The compressor's gain reduction on a VU face: the needle rests at 0 and falls to the left, "
                                                "and the hood reads the peak reduction in dB. It stays at 0 while the compressor is out.");
     setHelp (oversample, "Oversample", "The card at the host rate (1X) or twice it (2X). 2X adds 4 samples of latency and brings the bells and "
@@ -632,11 +672,15 @@ void EditorView::resized()
 
     // Level: input and output bars, and the two trims beneath, ending level with the last band.
     const int trimY = bandsBottom - input.preferredHeight();
+    // The three rows (IN, CARD, OUT) start where the two bars started, so the gap under the VU panel is
+    // unchanged; the extra row is absorbed by a 17 px pitch of 16 px rows.
+    constexpr int meterPitch = 17, meterHeight = 16;
     const int barsY = trimY - 14 - 2 * rowPitch;
-    levelBars = { rightX, barsY, rightWidth, 2 * rowPitch - 4 };
-    const int barColumn = Theme::widthOf (Theme::labelFont(), "OUT") + kLabelGap;
-    inputMeter.setBounds (rightX + barColumn, barsY, rightWidth - barColumn, kRowHeight);
-    outputMeter.setBounds (rightX + barColumn, barsY + rowPitch, rightWidth - barColumn, kRowHeight);
+    levelBars = { rightX, barsY, rightWidth, 2 * meterPitch + meterHeight };
+    const int barColumn = Theme::widthOf (Theme::labelFont(), "CARD") + kLabelGap;
+    inputMeter.setBounds (rightX + barColumn, barsY, rightWidth - barColumn, meterHeight);
+    overloadLamp.setBounds (rightX + barColumn, barsY + meterPitch, rightWidth - barColumn, meterHeight);
+    outputMeter.setBounds (rightX + barColumn, barsY + 2 * meterPitch, rightWidth - barColumn, meterHeight);
     input.setBounds (rightX, trimY, knobCell, input.preferredHeight());
     output.setBounds (rightX + knobCell, trimY, knobCell, output.preferredHeight());
 
@@ -666,8 +710,9 @@ void EditorView::paint (juce::Graphics& g)
     for (size_t i = 0; i < bandCentreY.size(); ++i)
         g.drawText (bandNames[i], margin, bandCentreY[i] - 8, bandLabelColumn, 16, juce::Justification::centredLeft, false);
 
-    // The two level bars' names.
+    // The level rows' names: the input bar, the card's overload lamp, the output bar.
     g.drawText ("IN", levelBars.getX(), inputMeter.getY(), levelBars.getWidth(), inputMeter.getHeight(), juce::Justification::centredLeft, false);
+    g.drawText ("CARD", levelBars.getX(), overloadLamp.getY(), levelBars.getWidth(), overloadLamp.getHeight(), juce::Justification::centredLeft, false);
     g.drawText ("OUT", levelBars.getX(), outputMeter.getY(), levelBars.getWidth(), outputMeter.getHeight(), juce::Justification::centredLeft, false);
 
     // Help: what the control under the mouse does.
@@ -728,6 +773,7 @@ void EditorView::tick()
 {
     inputMeter.push (juce::jmax (processor.takeInputPeak (0), processor.takeInputPeak (1)));
     outputMeter.push (juce::jmax (processor.takeOutputPeak (0), processor.takeOutputPeak (1)));
+    overloadLamp.push (processor.takeCardOverload());
     reductionMeter.push (processor.takeCompressorReduction());
 
     auto* under = juce::Desktop::getInstance().getMainMouseSource().getComponentUnderMouse();
