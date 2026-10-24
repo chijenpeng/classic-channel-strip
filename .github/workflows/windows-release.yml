@@ -97,8 +97,21 @@ jobs:
             "Code signing: unsigned"
           ) | Set-Content -LiteralPath (Join-Path $packageRoot "BUILD-INFO.txt") -Encoding utf8
 
-          $zipPath = Join-Path $env:RUNNER_TEMP "classic-channel-strip-$version-windows-x64.zip"
+          @(
+            "Classic Channel Strip $version - Windows x64 VST3"
+            ""
+            "Copy the entire Classic Channel Strip.vst3 bundle folder into C:\Program Files\Common Files\VST3 (administrator approval may be required), then rescan your VST3 host. Keep the bundle folder structure intact. This is an unsigned x64 plug-in for a 64-bit host."
+            ""
+            "Requires the Microsoft Visual C++ v14 x64 Redistributable. If your system lacks MSVCP140.dll or VCRUNTIME140.dll, install the current x64 package from Microsoft: https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist"
+            ""
+            "This release has a separate plug-in identity from the original research version. Existing sessions keep the original plug-in identity. See README.md, THIRD_PARTY_NOTICES.md, licenses/ and BUILD-INFO.txt."
+          ) | Set-Content -LiteralPath (Join-Path $packageRoot "INSTALL.txt") -Encoding utf8
+
+          $zipName = "classic-channel-strip-$version-windows-x64.zip"
+          $zipPath = Join-Path $env:RUNNER_TEMP $zipName
           Compress-Archive -Path (Join-Path $packageRoot "*") -DestinationPath $zipPath -CompressionLevel Optimal
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLower()
+          [System.IO.File]::WriteAllText("$zipPath.sha256", "$hash  $zipName`n")
           "PACKAGE_PATH=$zipPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Upload package to the existing draft release
@@ -110,4 +123,4 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $isDraft.Trim() -ne "true") {
             throw "Release $env:RELEASE_TAG must already exist as a draft."
           }
-          gh release upload $env:RELEASE_TAG $env:PACKAGE_PATH --repo $env:GITHUB_REPOSITORY --clobber
+          gh release upload $env:RELEASE_TAG $env:PACKAGE_PATH "$($env:PACKAGE_PATH).sha256" --repo $env:GITHUB_REPOSITORY --clobber
