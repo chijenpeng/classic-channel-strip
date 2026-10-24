@@ -709,10 +709,10 @@ void testDynamics()
     check (gated[0] < -35.0 && gated[3] > 35.0 && expanded[0] > gated[0] + 15.0,
            fmt ("gate reaches %.2f dB (meter %.2f); 2:1 expander is gentler at %.2f dB", gated[0], gated[3], expanded[0]));
 
-    const auto attackSeconds = [] (bool fast)
+    const auto attackSeconds = [sampleRate = fs] (bool fast)
     {
         fx::SslE10Dynamics dynamics;
-        dynamics.prepare (fs);
+        dynamics.prepare (sampleRate);
         fx::SslE10Settings s;
         s.enabled = true;
         s.automaticMakeup = false;
@@ -720,12 +720,12 @@ void testDynamics()
         s.compressorRatio = 20.0f;
         s.compressorFastAttack = fast;
         dynamics.setSettings (s);
-        for (int i = 0; i < (int) (0.5 * fs); ++i)
+        for (int i = 0; i < (int) (0.5 * sampleRate); ++i)
         {
-            float x = 0.5f * std::sin ((float) (2.0 * kPi * 1000.0 * i / fs));
+            float x = 0.5f * std::sin ((float) (2.0 * kPi * 1000.0 * i / sampleRate));
             dynamics.process (&x, nullptr, &x, nullptr, 1);
             if (dynamics.compressorGainReductionDb() >= 10.0f)
-                return i / fs;
+                return i / sampleRate;
         }
         return 0.5;
     };
