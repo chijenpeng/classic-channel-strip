@@ -1,5 +1,40 @@
 # Classic Channel Strip release notes
 
+## v0.3.0
+
+The compressor is now in by default, and the 82E10 release network has been rebuilt from the
+service drawing so that the release knob works over its whole range.
+
+- **New instances start with the compressor in.** Dynamics In, ratio 5:1 and release 0.1 s are the
+  new defaults. Dynamics stay before the EQ (Pre EQ, as before). Parameter IDs, order and ranges
+  are unchanged, so only the starting values differ.
+- **Old sessions load as they sounded.** A session saved before the dynamics controls existed
+  restores them as Out, 2:1 and 0.4 s. A session that already contains them keeps its saved values.
+- **The release knob works over its range.** The knob is the 10 % recovery time of the gain
+  reduction after a sustained 10 dB reduction. It now spans 0.14 s to 12.6 s, and 0.4, 1, 1.5 and
+  4 s land within 1 %. The earlier model could not go below about 1 s. The 0.1 s legend sits at the
+  0.14 s end. Recovery is program-dependent: a short burst recovers faster than sustained
+  compression.
+- **Attack times follow the drawing.** AUTO reaches 10 dB in about 11 ms (previously 12.8 ms) and
+  FAST in about 0.35 ms (previously 0.42 ms).
+- **Gain reduction meter.** The needle has VU-style ballistics chosen for this plug-in (a 65 ms time
+  constant, rising and falling alike) and no longer dips between large host blocks. The numeric GR
+  readout is removed.
+- **CPU.** The rebuilt network costs more than v0.2.0's. On an Apple M3 with the dynamics in, the
+  2x configuration ran at about 135x real time in v0.2.0 and about 95x now. With the new defaults
+  (dynamics in) the 2x default runs at about 90x; with dynamics out it runs at about 270x.
+- Saved state, plug-in identity and the 2x Oversampling default are unchanged.
+
+Packages:
+
+- macOS Universal: AU and VST3, arm64 + x86_64; ad-hoc signed, not notarized.
+- Windows x64: VST3, unsigned; requires the [Microsoft Visual C++ v14 x64 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
+
+Validation (macOS, Apple Silicon): CTest 2/2 passed (`classic_channel_test` with the release-network
+checks, and `classic_channel_processor_test` with the new-default and old-session checks); both
+architecture slices built; the editor was rendered at its default size and shows the new defaults.
+No DAW-host test on an end-user Windows system or Intel Mac runtime test has been performed.
+
 ## v0.2.0
 
 Classic Channel Strip now runs the 82E242 card as a linear discrete-time state space extracted from the same schematic netlist, 24 states in all. Version 0.1.0 solved the whole netlist every sample with nonlinear op-amp devices.

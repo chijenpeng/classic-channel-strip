@@ -39,11 +39,12 @@ ad-hoc signed and not notarized. The Windows package includes an unsigned x64 VS
 | Output | −20 … +20 dB | Gain after the card. |
 | CARD lamp | Indicator | Lights when an op-amp in the card goes past its linear limit (±14.85 V, +4.6 dBFS at the card with the EQ flat; boosts lower it). It holds for about a second and reads the peak reached, in dBFS at the card. Turn Input down to stay clean. |
 | Oversampling | 1× / 2× | Processes at host rate or twice that rate. 2× adds 4 samples of latency. |
-| Dynamics | Out / In | Stereo-linked 82E10 compressor/limiter. Bypass is bit-transparent. |
-| Comp threshold, ratio | +10 … −20 dB; 1:1 … LIMIT | Feed-forward compression with the card's diode-network soft knee. |
-| Comp attack, release | Auto / Fast; 0.1 … 4 s | AUTO follows the program-dependent path; FAST selects the short attack branch. |
+| Dynamics | Out / In (default In) | Stereo-linked 82E10 compressor/limiter. Bypass is bit-transparent. |
+| Comp threshold, ratio | +10 … −20 dB; 1:1 … LIMIT (ratio default 5:1) | Feed-forward compression with the card's diode-network soft knee. |
+| Comp attack, release | Auto / Fast; 0.1 … 4 s (release default 0.1 s) | AUTO follows the program-dependent path and reaches 10 dB in about 11 ms; FAST selects the short attack branch, 0.35 ms to 10 dB. Release is the 82E10 release network rebuilt from the drawing. The knob is the 10 % recovery time of the gain reduction after a sustained 10 dB reduction; it spans 0.14 s to 12.6 s, and 0.4, 1, 1.5 and 4 s land within 1 %. Recovery is program-dependent: a short burst recovers faster than sustained compression. |
+| Gain reduction meter | Indicator | VU-style needle showing the compressor's gain reduction. It rests at 0 and falls to the left, with 65 ms ballistics chosen for this plug-in, rising and falling alike. It has no numeric readout. |
 | Make-up | Off / Auto | Threshold- and ratio-linked automatic make-up. |
-| Position | Pre EQ / Post EQ | Places dynamics before or after the filter/EQ card. |
+| Position | Pre EQ / Post EQ (default Pre EQ) | Places dynamics before or after the filter/EQ card. |
 | Sidechain | Input / Filters / EQ / External | Flat key, key filtered by the actual card sections, or the host sidechain input. |
 
 Default order is Input → Dynamics → HPF → LPF → EQ → Output. Post EQ places dynamics after the
@@ -59,6 +60,7 @@ section. External uses the host's optional key input.
 - Below about 5 Hz the card has fewer high-pass poles than the drawing, so a DC offset is blocked at
   the output only.
 - Switching Oversampling while audio plays restarts the card at the new rate and can click.
+- The release knob's 0.1 s legend sits below the network's reachable range; it behaves as 0.14 s.
 - No DAW-host test on an end-user Windows system or an Intel Mac runtime test has been performed.
 
 ## Build
@@ -82,12 +84,12 @@ to copy AU and VST3 bundles to the current user's plug-in folders.
 
 ## Validation
 
-Version 0.2.0 on macOS (Apple Silicon): CTest 2/2 (`classic_channel_test`, with its state-space
-accuracy, headroom and clipper checks, and `classic_channel_processor_test`), universal arm64 + x86_64
-AU and VST3 slices, `auval -v aufx ClCs Cdpg` passing, and the VST3 loading in an offline host with
-the same 34 parameters in the same order as v0.1.0. The editor was inspected at its default,
-minimum and maximum sizes and with the CARD lamp lit. The Windows package is built and tested by the
-repository's release workflow.
+Version 0.3.0 on macOS (Apple Silicon): CTest 2/2 (`classic_channel_test`, with its state-space
+accuracy, headroom, clipper and release-network checks, and `classic_channel_processor_test`, with the
+new-default and old-session checks), universal arm64 + x86_64 AU and VST3 slices, and the 34 parameters
+in the same order as v0.1.0. The editor was rendered at its default size and shows the new defaults;
+the minimum, maximum and CARD-lamp views are not re-inspected for this release. The Windows package
+is built and tested by the repository's release workflow.
 
 ## Tests and tools
 
@@ -144,16 +146,15 @@ Oversampling changes are applied on the message thread after audio leaves the id
 `processBlock` does not construct an engine. Switching while audio plays restarts the card at the
 new rate from rest and can produce a small click.
 
-CPU, measured on an Apple M3 (arm64 build, one core, 48 kHz, 512-sample blocks) while other work was
-loading the machine, so these are conservative: `classic_channel_snapshot --time` with both filters,
-all four bands and the dynamics in, stereo, ran at about 270x real time at 1x and 120x at 2x (best of
-several passes); the defaults ran at about 825x at 1x and 260-270x at 2x. An offline plug-in host
-benchmark of the VST3 at the native defaults (stereo, 48 kHz, 512-sample blocks, 2x) gave 268-270x
-real time, 40 µs per block against a 10.7 ms deadline. v0.1.0's engine ran roughly 2-4x real time in
-the same settings (our earlier measurements), so this release uses about 1/100 of the CPU. With
-every card control moving all the time the cost rises (`--moving`: about 90x at 1x and 60-67x at 2x,
-stereo, everything in), because the state space is re-extracted every 32 samples. Actual use depends
-on the computer, sample rate and settings.
+CPU, measured on an Apple M3 (arm64 build, one core, 48 kHz, 512-sample blocks, stereo) with
+`classic_channel_snapshot --time`, best of five passes, while other work loaded the machine. The
+defaults (dynamics in at 5:1) ran at about 90x real time at 2x and about 200x at 1x. With dynamics
+out they ran at about 270x at 2x and 850x at 1x. With both filters, all four bands and the dynamics
+in, about 95x at 2x and 200x at 1x. With every card control moving all the time (`--moving`, 2x,
+defaults) about 58x, because the state space is re-extracted every 32 samples. The dynamics now cost
+more than in v0.2.0: the same dynamics-in configuration ran at about 135x at 2x there, so the rebuilt
+release network uses roughly 40 % more CPU per sample; the card is unchanged. Actual use depends on
+the computer, sample rate and settings.
 The processor regression test checks that `processBlock` makes zero allocations with controls still,
 moving, oversized blocks, and during an oversampling change.
 

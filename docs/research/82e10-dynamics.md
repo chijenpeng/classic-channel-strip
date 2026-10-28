@@ -8,9 +8,9 @@ blocks retain their drawing designators in `Source/dsp/SslE10Dynamics.cpp`.
 ## Primary sources
 
 - SSL drawing **T82010.71, 611E/V Dynamics Section**, revision table through issue 15, in the
-  [SSL 4000G Console Service Manual](https://funkwerkes.com/web/wp-content/techdocs/MixedProAudio/SSL-4000G-Console-Service-Manual-v1_1.pdf).
-  This is the value authority. In particular, it has **R22 =
-  10 kΩ**, R21 = 10 kΩ for AUTO attack, R19 = 300 Ω for FAST, C5 = 3.3 µF and C6 = 22 µF.
+  *SL4000G Console Service Manual*. This is the value authority. In particular, it has **R22 =
+  10 kΩ**, R2 = 10 kΩ for SLOW attack (AUTO), R19 = 300 Ω in parallel with it for FAST, C5 =
+  3.3 µF and C6 = 22 µF.
 - The older two-page public scan is useful for tracing but is not the value authority:
   <https://retrorecordingsxr.com/wp-content/uploads/manuals/ssl/ssl_82E10.pdf>. It prints R22 as
   1 MΩ; that would produce a roughly 22-second release and is a known error.
@@ -50,16 +50,68 @@ The two gangs of the 10 kΩ threshold pot provide threshold offset and automatic
 loaded Shockley-diode rectifier, so the soft knee comes from the drawn over-easy network rather
 than a quadratic knee formula.
 
-The attack switch is correctly labelled **AUTO / FAST**:
+The attack switch is correctly labelled **AUTO / FAST**. It selects the resistance between the
+sum node N and the timing node X:
 
-- AUTO selects R21 10 kΩ into C5 3.3 µF. A fixed fraction of a larger control step is reached
-  sooner, which is the circuit's program-dependent behavior.
-- FAST selects R19 300 Ω. R19 × C5 is 0.99 ms; about three time constants give the published
-  3 ms settling figure.
+- AUTO selects the SLOW resistor R2 10 kΩ alone. The old code called this R21; the value is the
+  same. Measured: 10 dB of reduction in 11.0 ms (the old C5-only model gave 12.8 ms).
+- FAST puts R19 300 Ω in parallel with R2: R2 ∥ R19 = 291 Ω. Measured: 10 dB in 0.35 ms (the old
+  model gave 0.42 ms, with R19 alone).
 
-C5, corrected R22 10 kΩ, C6 22 µF, R23 10 kΩ and the 250 kΩ logarithmic release pot form the
-two-time-constant recovery. Control voltage decays in the capacitor network before entering the
-exponential VCA; no gain-domain release smoother remains.
+**Release network (T82010·71, the drawing's topology).** The nodes are X, B, N20 and N:
+
+- X is the control-voltage node (CV = V(X)), read through a high-impedance buffer.
+- C5 3.3 µF runs from X to B. C6 22 µF runs from B to 0 V.
+- R22 10 kΩ runs from B to N20 (the public scan at the primary-sources link prints 1 MΩ there, the
+  known error). The RELEASE pot, a 250 kΩ logarithmic rheostat, runs from N20 to 0 V. R23 10 kΩ runs
+  from N20 to N.
+- The attack resistance runs from N to X.
+- Charging: when the detector target exceeds V(N), D3 conducts and drives N to the target (ideal
+  diode). Otherwise N floats, joined only by R23 and the attack resistance. R13 (1 MΩ) is ignored.
+
+Each sample solves the nodal system for V(X), V(B), V(N20) and V(N) (a 4 × 4 dense solve, fixed
+arrays, no allocation). C5 and C6 are backward-Euler companions. The states are V(X) and V(B), so a
+change of release or attack keeps the stored charge.
+
+*Check against the drawing.* The crop of T82010·71 used for this model shows the charging diode
+(labelled D7 in the crop) on the X junction, not on N. A diode directly on X would bypass the attack
+switch, so the model follows the drawing-based D3 on N. The full sheet should confirm the designator and
+the node.
+
+**Release law.** The knob's seconds are the 10 % recovery of the gain reduction after 2 s of a
+1 kHz tone at about 10 dB of reduction, then a tone 60 dB under the threshold. For each pot
+resistance on a 33-point grid (0 Ω, then 32 points 0.1 decade apart up to 250 kΩ), the time is
+measured offline by the same solver (`SslE10Dynamics::compressorTenPercentSeconds`; `classic_channel_test
+--release-table` prints the grid). The table is embedded in `SslE10Dynamics.cpp`. At run time the
+seconds map to ohms by interpolation of ln(ohms) against ln(seconds).
+
+Measured table: the achievable 10 % range is **0.140 s (about 790 Ω) to 12.6 s (250 kΩ)**. The
+curve is not monotonic below 790 Ω. At 0 Ω the time is 0.144 s, slower than at 790 Ω, because C6
+drains through R22 while the pot is near zero. The 0.1 s legend lies below the range; it sits at the
+0.140 s end and is reported as such. The hand estimate (C5 discharging through R23 + R2 = 20 kΩ,
+ln(10) × 3.3 µF × 20 kΩ = 0.152 s) is close; the simulated 0.144 s is shorter because part of the
+charge reaches C6 through R22. The 0 Ω end is taken as a 1 Ω wiper floor, a chosen value. An offline
+check with a 0.001 Ω floor moves the 0 Ω time by 0.006 %, so the floor does not affect the result.
+
+Measured through `process()` (48 kHz, 2 s hold at the 10 dB tone): knob 0.1 → 0.140 s (range end,
+was 1.007 s); 0.4 → 0.397 s (was 1.007 s); 1.0 → 1.003 s (was 1.007 s); 1.5 → 1.499 s (was 1.497 s);
+4.0 → 3.989 s (was 3.981 s). The old model could not go below 1.007 s because the pot sat in series
+with R22 + R23 on the C6 leg.
+
+**Program dependence.** A 50 ms burst recovers faster than the sustained tone at the same knob:
+at 4 s, 1.20 s against 3.99 s; at 1 s, 0.29 s against 1.00 s. C6 has charged little after a burst,
+so the release has less to drain. The sustained reference is the reduction at the end of the 2 s
+hold, and at long settings that reduction is still rising then: C6 charges through R22 and the pot,
+and at 4 s the reduction settles only after about 8 s.
+
+**Static reduction depends on the release knob.** At one level, the reduction the tone reaches
+after the 2 s hold grows with the release setting: about 10.0 dB at 0.1 s, 10.25 dB at 1 s and
+10.85 dB at 4 s. The cause is the detector ripple, not the timing solver. The model's AD536 averaging
+(25 ms/µF with the drawing's 3.3 nF, about 82 µs) leaves a 2 kHz ripple on a 1 kHz tone: the target
+swings from about 1.7 to 3.0 V. D3 charges N to the peaks, and the release network keeps that peak
+bias. With the averaging made 1000 times longer, every setting holds the same 10.49 dB. This is left
+as the topology gives it. Whether it is right is an open question for the owner (the value of C2,
+or the diode's node).
 
 ## Expander/gate
 

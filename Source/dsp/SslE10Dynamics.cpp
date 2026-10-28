@@ -18,18 +18,20 @@ constexpr float kAd536InputOhms = 16.67e3f;
 constexpr float kAd536MsPerMicrofarad = 25.0e-3f;
 constexpr float kDetectorVoltsPerDb = 0.1f; // drawing: LAW = 10 dB = 1 V at TP1/TP2
 
-constexpr float kR19 = 300.0f;         // compressor FAST attack
-constexpr float kR21 = 10.0e3f;        // compressor AUTO attack
+constexpr float kR19 = 300.0f;         // compressor FAST attack, in parallel with the SLOW R2
+constexpr float kR2Attack = 10.0e3f;   // compressor SLOW attack (drawing R2). AUTO uses it alone: the old R21 value.
 constexpr float kR22 = 10.0e3f;        // corrected service value; the old public scan says 1 M
 constexpr float kR23 = 10.0e3f;
 constexpr float kC5 = 3.3e-6f;
 constexpr float kC6 = 22.0e-6f;
-constexpr float kCompReleasePot = 250.0e3f;
+// The 250 k log release pot runs from N20 to 0 V (its grid is in the table below). Chosen, not a
+// drawing value: the pot's 0-ohm end is taken as a 1 ohm wiper so that the network
+// stays finite. An offline check with a 0.001 ohm floor moves the 0-ohm time by 0.006 %.
+constexpr float kPotWiperFloorOhms = 1.0f;
 
 constexpr float kR30 = 36.0e3f;        // gate comparator / hysteresis network
 constexpr float kR31 = 510.0e3f;
 constexpr float kR34 = 36.0e3f;
-constexpr float kD1ZenerVolts = 1.5f;
 constexpr float kR44 = 1.0f;           // gate FAST charge path
 constexpr float kR45 = 100.0f;         // gate SLOW charge path
 constexpr float kR47 = 10.0e3f;
@@ -62,10 +64,48 @@ float clampTiny (float x) noexcept
     return std::abs (x) < 1.0e-20f ? 0.0f : x;
 }
 
+double clampTiny (double x) noexcept
+{
+    return std::abs (x) < 1.0e-20 ? 0.0 : x;
+}
+
 float parallel (float a, float b) noexcept
 {
     return a * b / (a + b);
 }
+
+// The ratio control: 20 means LIMIT, a ratio of 1000. Returns the feed-forward travel 1 - 1/ratio.
+float ratioTravelOf (float ratioSetting) noexcept
+{
+    const float ratio = ratioSetting >= 19.5f ? 1000.0f : std::max (1.0f, ratioSetting);
+    return 1.0f - 1.0f / ratio;
+}
+
+// Release table, measured offline by compressorTenPercentSeconds() (classic_channel_test --release-table prints
+// it at 48 kHz; the 44.1 and 96 kHz values agree to 0.00002 s). Pot grid: 0 ohms, then 32
+// log-spaced points 0.1 decade apart ending at 250 k. The times are the 10 % recovery after 2 s
+// of the sustained 10 dB level, in seconds.
+// The 10 % time is not monotonic at the low end: C6 drains through R22 when the pot is near 0 ohms,
+// so 0 ohms (0.144 s) is slower than about 790 ohms (0.1403 s, the fastest release the network
+// has). Steps below kReleaseFirstStep are kept as measured but never used for the mapping.
+constexpr int kReleaseSteps = 33;
+constexpr int kReleaseFirstStep = 7;
+constexpr float kReleaseOhms[kReleaseSteps] = {
+    0.00f, 198.58f, 250.00f, 314.73f, 396.22f, 498.82f,
+    627.97f, 790.57f, 995.27f, 1252.97f, 1577.39f, 1985.82f,
+    2500.00f, 3147.31f, 3962.23f, 4988.16f, 6279.72f, 7905.69f,
+    9952.68f, 12529.68f, 15773.93f, 19858.21f, 25000.00f, 31473.14f,
+    39622.33f, 49881.56f, 62797.16f, 79056.94f, 99526.79f, 125296.81f,
+    157739.34f, 198582.06f, 250000.00f
+};
+constexpr float kReleaseSeconds[kReleaseSteps] = {
+    0.14372f, 0.14221f, 0.14190f, 0.14155f, 0.14119f, 0.14082f,
+    0.14051f, 0.14031f, 0.14035f, 0.14080f, 0.14190f, 0.14400f,
+    0.14760f, 0.15344f, 0.16266f, 0.17713f, 0.20035f, 0.23963f,
+    0.31230f, 0.44980f, 0.65466f, 0.90267f, 1.19591f, 1.54879f,
+    1.98006f, 2.51278f, 3.17536f, 4.00315f, 5.04027f, 6.34197f,
+    7.97761f, 10.03429f, 12.62155f
+};
 }
 
 void SslE10Dynamics::prepare (double sampleRate) noexcept
@@ -79,7 +119,8 @@ void SslE10Dynamics::reset() noexcept
 {
     detectors[0] = detectors[1] = {};
     audioPaths[0] = audioPaths[1] = {};
-    compressorC5 = compressorC6 = gateC9 = 0.0f;
+    timing = {};
+    gateC9 = 0.0f;
     gateOpen = true;
     compressorMeter.store (0.0f, std::memory_order_relaxed);
     gateMeter.store (0.0f, std::memory_order_relaxed);
@@ -126,15 +167,137 @@ void SslE10Dynamics::updateCoefficients() noexcept
     const float tau = kR85 * effectiveC;
     k.outputHighPass = tau / (tau + 1.0f / (float) fs);
 
-    const float attackR = settings.compressorFastAttack ? kR19 : kR21;
-    k.attack5 = onePole (attackR * kC5);
-    k.attack6 = onePole ((attackR + kR22) * kC6);
-    // The front-panel seconds are the 90% recovery of the C6 leg. Inverting that scale
-    // gives the resistance of the 250 k log release pot; R23 and corrected R22 remain in it.
-    const float wantedTau = std::max (0.001f, settings.compressorReleaseSeconds / 2.3025851f);
-    const float releaseR = std::clamp (wantedTau / kC6 - kR23 - kR22, 0.0f, kCompReleasePot);
-    k.release6 = onePole ((kR23 + kR22 + releaseR) * kC6);
-    k.release5 = onePole ((kR23 + releaseR) * kC5);
+    const float attackR = settings.compressorFastAttack ? parallel (kR2Attack, kR19) : kR2Attack;
+    k.timing = timingNetwork (fs, attackR, compressorPotOhms (settings.compressorReleaseSeconds));
+}
+
+void SslE10Dynamics::compressorReleaseRange (float& minSeconds, float& maxSeconds) noexcept
+{
+    minSeconds = kReleaseSeconds[kReleaseFirstStep];
+    maxSeconds = kReleaseSeconds[kReleaseSteps - 1];
+}
+
+float SslE10Dynamics::compressorPotOhms (float seconds) noexcept
+{
+    constexpr int last = kReleaseSteps - 1;
+    if (seconds <= kReleaseSeconds[kReleaseFirstStep])
+        return kReleaseOhms[kReleaseFirstStep];
+    if (seconds >= kReleaseSeconds[last])
+        return kReleaseOhms[last];
+    for (int i = kReleaseFirstStep; i < last; ++i)
+    {
+        if (seconds < kReleaseSeconds[i + 1])
+        {
+            // Log-space interpolation: ln(ohms) is linear in ln(seconds) between the grid points.
+            const float lo = std::log (std::max (kReleaseOhms[i], kPotWiperFloorOhms));
+            const float hi = std::log (std::max (kReleaseOhms[i + 1], kPotWiperFloorOhms));
+            const float u = (std::log (seconds) - std::log (kReleaseSeconds[i]))
+                            / (std::log (kReleaseSeconds[i + 1]) - std::log (kReleaseSeconds[i]));
+            return std::exp (lo + u * (hi - lo));
+        }
+    }
+    return kReleaseOhms[last];
+}
+
+SslE10Dynamics::TimingNetwork SslE10Dynamics::timingNetwork (double sampleRate, float attackOhms, float potOhms) noexcept
+{
+    TimingNetwork n;
+    n.attack = 1.0 / (double) attackOhms;
+    n.c5 = (double) kC5 * sampleRate;   // backward Euler: C / h
+    n.c6 = (double) kC6 * sampleRate;
+    n.r22 = 1.0 / (double) kR22;
+    n.r23 = 1.0 / (double) kR23;
+    n.pot = 1.0 / (double) std::max (potOhms, kPotWiperFloorOhms);
+    return n;
+}
+
+namespace
+{
+/** Solves the 4 x 4 system m x = rhs (the rhs is column 4), in place, by Gaussian elimination with
+    partial pivoting. Doubles: the conductances span about six decades. Fixed size, no allocation. */
+void solveFourByFour (double (&m)[4][5]) noexcept
+{
+    for (int col = 0; col < 4; ++col)
+    {
+        int pivot = col;
+        for (int r = col + 1; r < 4; ++r)
+            if (std::abs (m[r][col]) > std::abs (m[pivot][col]))
+                pivot = r;
+        if (pivot != col)
+            for (int c = 0; c < 5; ++c)
+                std::swap (m[col][c], m[pivot][c]);
+        for (int r = col + 1; r < 4; ++r)
+        {
+            const double f = m[r][col] / m[col][col];
+            for (int c = col; c < 5; ++c)
+                m[r][c] -= f * m[col][c];
+        }
+    }
+    for (int r = 3; r >= 0; --r)
+    {
+        double sum = m[r][4];
+        for (int c = r + 1; c < 4; ++c)
+            sum -= m[r][c] * m[c][4];
+        m[r][4] = sum / m[r][r];
+    }
+}
+}
+
+void SslE10Dynamics::solveTiming (const TimingNetwork& n, TimingState& state, double targetVolts) noexcept
+{
+    // Node order X, B, N20, N. C5 (X-B) and C6 (B-0) are backward-Euler companions around the
+    // previous state; the attack resistance joins N and X; R22 joins B and N20; R23 joins N20 and N.
+    const double c5Charge = state.x - state.b;   // C5's voltage at the start of the step
+    double m[4][5] = {
+        { n.c5 + n.attack, -n.c5, 0.0, -n.attack, n.c5 * c5Charge },
+        { -n.c5, n.c5 + n.c6 + n.r22, -n.r22, 0.0, -n.c5 * c5Charge + n.c6 * state.b },
+        { 0.0, -n.r22, n.r22 + n.r23 + n.pot, -n.r23, 0.0 },
+        { -n.attack, 0.0, -n.r23, n.attack + n.r23, 0.0 },   // N floating: only R23 and the attack R meet
+    };
+
+    double driven[4][5];
+    std::copy (&m[0][0], &m[0][0] + 20, &driven[0][0]);
+    solveFourByFour (m);
+    if (m[3][4] < targetVolts)
+    {
+        // D3 conducts: N is driven to the target. Only its row changes.
+        driven[3][0] = 0.0;
+        driven[3][1] = 0.0;
+        driven[3][2] = 0.0;
+        driven[3][3] = 1.0;
+        driven[3][4] = targetVolts;
+        solveFourByFour (driven);
+        state.x = clampTiny (driven[0][4]);
+        state.b = clampTiny (driven[1][4]);
+    }
+    else
+    {
+        state.x = clampTiny (m[0][4]);
+        state.b = clampTiny (m[1][4]);
+    }
+}
+
+double SslE10Dynamics::compressorTenPercentSeconds (float potOhms, double sampleRate) noexcept
+{
+    const TimingNetwork n = timingNetwork (sampleRate, kR2Attack, potOhms);
+    constexpr double sustainedVolts = 10.0 * kControlVoltsPerDb;   // 10 dB of reduction
+    TimingState s;
+    const int hold = (int) (2.0 * sampleRate);
+    for (int i = 0; i < hold; ++i)
+        solveTiming (n, s, sustainedVolts);
+    const double start = s.x;
+    const int limit = (int) (60.0 * sampleRate);   // the 250 k end recovers in 12.6 s
+    for (int i = 0; i < limit; ++i)
+    {
+        const double before = s.x;
+        solveTiming (n, s, 0.0);
+        if (s.x <= 0.1 * start)
+        {
+            const double fraction = (before - 0.1 * start) / std::max (1.0e-300, before - s.x);
+            return (i + fraction) / sampleRate;
+        }
+    }
+    return 60.0;
 }
 
 float SslE10Dynamics::diodeKneeVolts (float overVolts) noexcept
@@ -155,10 +318,8 @@ float SslE10Dynamics::diodeKneeVolts (float overVolts) noexcept
 float SslE10Dynamics::compressorTargetVolts (float levelVolts) const noexcept
 {
     const float thresholdVolts = settings.compressorThresholdDb * kDetectorVoltsPerDb;
-    const float ratio = settings.compressorRatio >= 19.5f ? 1000.0f
-                                                          : std::max (1.0f, settings.compressorRatio);
-    // The two 10 k linear ratio gangs form the feed-forward slope: travel = 1 - 1/ratio.
-    const float ratioTravel = 1.0f - 1.0f / ratio;
+    // The two 10 k linear ratio gangs form the feed-forward slope.
+    const float ratioTravel = ratioTravelOf (settings.compressorRatio);
     const float conducted = diodeKneeVolts (levelVolts - thresholdVolts);
     const float reductionDb = conducted / kDetectorVoltsPerDb * ratioTravel;
     return std::max (0.0f, reductionDb * kControlVoltsPerDb);
@@ -168,8 +329,8 @@ float SslE10Dynamics::gateTargetVolts (float levelVolts) noexcept
 {
     const float thresholdVolts = settings.gateThresholdDb * kDetectorVoltsPerDb;
     // D8/D9, equal R30/R34 and R31 give a few dB of positive-feedback hysteresis, increasing
-    // toward the bottom of the threshold pot. The 1V5 reference fixes the diode operating point.
-    const float diodeDrop = 0.55f + 0.03f * (kD1ZenerVolts - 1.5f);
+    // toward the bottom of the threshold pot. D1 (1V5 zener) fixes the diode operating point.
+    const float diodeDrop = 0.55f;
     const float fixedHysteresis = diodeDrop * kR30 / (kR30 + kR34);
     const float thresholdFeedback = std::max (0.0f, -thresholdVolts) * kR30 / kR31;
     const float hysteresisVolts = fixedHysteresis + thresholdFeedback;
@@ -196,20 +357,8 @@ float SslE10Dynamics::gateTargetVolts (float levelVolts) noexcept
 
 float SslE10Dynamics::updateCompressorTiming (float targetVolts) noexcept
 {
-    if (targetVolts > compressorC5)
-    {
-        compressorC5 = k.attack5 * compressorC5 + (1.0f - k.attack5) * targetVolts;
-        compressorC6 = k.attack6 * compressorC6 + (1.0f - k.attack6) * targetVolts;
-    }
-    else
-    {
-        compressorC6 = k.release6 * compressorC6 + (1.0f - k.release6) * targetVolts;
-        const float heldTarget = std::max (targetVolts, compressorC6);
-        compressorC5 = k.release5 * compressorC5 + (1.0f - k.release5) * heldTarget;
-    }
-    compressorC5 = clampTiny (compressorC5);
-    compressorC6 = clampTiny (compressorC6);
-    return compressorC5;
+    solveTiming (k.timing, timing, (double) targetVolts);
+    return (float) timing.x;   // CV = V(X)
 }
 
 float SslE10Dynamics::updateGateTiming (float targetVolts) noexcept
@@ -282,9 +431,7 @@ void SslE10Dynamics::process (float* left, float* right, const float* sideLeft,
     }
 
     updateCoefficients();
-    const float ratio = settings.compressorRatio >= 19.5f ? 1000.0f
-                                                          : std::max (1.0f, settings.compressorRatio);
-    const float ratioTravel = 1.0f - 1.0f / ratio;
+    const float ratioTravel = ratioTravelOf (settings.compressorRatio);
     // The other gang of the 10 k dual threshold pot supplies the card's automatic make-up.
     const float makeupDb = settings.automaticMakeup
                                ? std::max (0.0f, 0.5f * (10.0f - settings.compressorThresholdDb)

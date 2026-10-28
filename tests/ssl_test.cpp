@@ -2,16 +2,18 @@
 // band checks are ported from the analog-recreation project's fx_test (its SSL section) and run
 // at 44.1, 48 and 96 kHz; the filter checks are this plug-in's. The model is a circuit, so the
 // checks are against SSL's Rev. 4 specification and against the schematic's own AC analysis
-// (tools/ssl_eq_ac.cpp), not against exact formulas. Prints measured against expected for every
+// (tools/classic_channel_eq_ac.cpp), not against exact formulas. Prints measured against expected for every
 // check and exits non-zero on a failure.
 //
 //   classic_channel_test            everything
 //   classic_channel_test --quick    the filter and switch checks only
+//   classic_channel_test --release-table   the 33-point pot grid and its 10% times (regenerates the table in SslE10Dynamics.cpp)
 
 #include "dsp/SslE242.h"
 #include "dsp/SslE10Dynamics.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -420,7 +422,7 @@ struct FilterRow
     double corner = 0, expectedCorner = 0, slope = 0, slopeFs = 0, pass = 0, flatness = 0, peaking = 0;
 };
 
-/** The schematic's own values (tools/ssl_eq_ac.cpp filters / laws), for the expected columns:
+/** The schematic's own values (tools/classic_channel_eq_ac.cpp filters / laws), for the expected columns:
     the -3 dB point where the knob is past the pot's end, and the passband (dB). */
 constexpr double kHpfTopHz = 394.3, kHpfBottomHz = 15.146, kLpfBottomHz = 3186.5;
 double circuitHpfPassband (double knob)
@@ -733,6 +735,95 @@ void testDynamics()
     check (fastAttack < autoAttack * 0.5 && fastAttack < 0.010 && autoAttack > 0.010,
            fmt ("R21/C5 AUTO reaches 10 dB GR in %.2f ms; R19/C5 FAST in %.2f ms",
                 autoAttack * 1000.0, fastAttack * 1000.0));
+
+    // Release: the time for the gain reduction to fall to 10% of its value after 2 s of a steady
+    // 1 kHz tone at about 10 dB of reduction, then a tone 60 dB under the threshold. The pot's
+    // resistance sets the time (SslE10Dynamics::compressorPotOhms maps seconds to ohms from the
+    // table), so the knob's seconds are checked through the processor's own path, one sample a call.
+    // Threshold -20 dBFS, 4:1: 10 dB of reduction is 13.3 dB over the threshold.
+    constexpr float kTenDbTone = 0.0630f;
+    const auto recovery = [sampleRate = fs] (float releaseSeconds, double holdSeconds, float holdAmplitude)
+    {
+        fx::SslE10Dynamics dynamics;
+        dynamics.prepare (sampleRate);
+        fx::SslE10Settings s;
+        s.enabled = true;
+        s.automaticMakeup = false;
+        s.compressorThresholdDb = -20.0f;
+        s.compressorRatio = 4.0f;
+        s.compressorReleaseSeconds = releaseSeconds;
+        dynamics.setSettings (s);
+        for (int i = 0; i < (int) (holdSeconds * sampleRate); ++i)
+        {
+            float x = holdAmplitude * (float) std::sin (2.0 * kPi * 1000.0 * i / sampleRate);
+            dynamics.process (&x, nullptr, &x, nullptr, 1);
+        }
+        const float start = dynamics.compressorGainReductionDb();
+        const float releaseAmplitude = holdAmplitude * std::pow (10.0f, -73.3f / 20.0f);   // 60 dB under the threshold
+        for (int i = 0; i < (int) (20.0 * sampleRate); ++i)
+        {
+            float x = releaseAmplitude * (float) std::sin (2.0 * kPi * 1000.0 * i / sampleRate);
+            dynamics.process (&x, nullptr, &x, nullptr, 1);
+            if (dynamics.compressorGainReductionDb() <= 0.1f * start)
+                return std::array<double, 2> { (i + 1) / sampleRate, (double) start };
+        }
+        return std::array<double, 2> { 20.0, (double) start };
+    };
+
+    float rangeMin = 0.0f, rangeMax = 0.0f;
+    fx::SslE10Dynamics::compressorReleaseRange (rangeMin, rangeMax);
+    std::printf ("    achievable 10%% recovery: %.3f to %.2f s (the pot's 0-250 k law, measured table)\n", rangeMin, rangeMax);
+
+    const float labels[5] = { 0.1f, 0.4f, 1.0f, 1.5f, 4.0f };
+    double times[5] = {}, gains[5] = {};
+    for (int i = 0; i < 5; ++i)
+    {
+        const auto r = recovery (labels[i], 2.0, kTenDbTone);
+        times[i] = r[0];
+        gains[i] = r[1];
+    }
+    check (times[0] < times[1] && times[1] < times[2] && times[2] < times[3] && times[3] < times[4],
+           fmt ("10%% recovery strictly increases with the knob: %.3f / %.3f / %.3f / %.3f / %.3f s (labels 0.1 / 0.4 / 1 / 1.5 / 4)",
+                times[0], times[1], times[2], times[3], times[4]));
+    for (int i = 0; i < 5; ++i)
+    {
+        const double label = labels[i];
+        if (label < rangeMin)
+            check (std::abs (times[i] - rangeMin) <= 0.05 * rangeMin,
+                   fmt ("knob %.1f s is below the achievable range: 10%% in %.3f s, held at the %.3f s end (reported)",
+                        label, times[i], rangeMin));
+        else if (label > rangeMax)
+            check (std::abs (times[i] - rangeMax) <= 0.05 * rangeMax,
+                   fmt ("knob %.1f s is above the achievable range: 10%% in %.2f s, held at the %.2f s end (reported)",
+                        label, times[i], rangeMax));
+        else
+            check (std::abs (times[i] - label) <= 0.15 * label,
+                   fmt ("knob %.1f s: 10%% recovery in %.3f s (%+.1f%%)", label, times[i], 100.0 * (times[i] - label) / label));
+    }
+    check (gains[0] > 9.5 && gains[1] > 9.5 && gains[2] > 9.5 && gains[3] > 9.5 && gains[4] > 9.5
+               && gains[0] < 11.5 && gains[1] < 11.5 && gains[2] < 11.5 && gains[3] < 11.5 && gains[4] < 11.5,
+           fmt ("sustained reduction at the end of the 2 s hold: %.2f / %.2f / %.2f / %.2f / %.2f dB (about 10 dB; longer releases hold more, see the note)",
+                gains[0], gains[1], gains[2], gains[3], gains[4]));
+
+    // Program dependence: a 50 ms burst releases faster than 2 s of sustained tone at the same knob.
+    const double burst4 = recovery (4.0f, 0.05, kTenDbTone)[0], burst1 = recovery (1.0f, 0.05, kTenDbTone)[0];
+    check (burst4 < times[4] && burst1 < times[2],
+           fmt ("after a 50 ms burst the 10%% recovery is shorter than after 2 s sustained: 4 s knob %.3f vs %.3f s, 1 s knob %.3f vs %.3f s",
+                burst4, times[4], burst1, times[2]));
+
+    // The table is the offline measurement of this network: the log-space mapping must return the
+    // seconds it was built from, and both ends of the table must still match the solver.
+    bool mapped = true;
+    for (double seconds : { 0.2, 0.7, 2.0, 6.0 })
+    {
+        const double back = fx::SslE10Dynamics::compressorTenPercentSeconds (fx::SslE10Dynamics::compressorPotOhms ((float) seconds), fs);
+        mapped = mapped && std::abs (back - seconds) <= 0.02 * seconds;
+    }
+    const double fastEnd = fx::SslE10Dynamics::compressorTenPercentSeconds (fx::SslE10Dynamics::compressorPotOhms (rangeMin), fs);
+    const double slowEnd = fx::SslE10Dynamics::compressorTenPercentSeconds (fx::SslE10Dynamics::compressorPotOhms (rangeMax), fs);
+    check (mapped && std::abs (fastEnd - rangeMin) <= 0.005 * rangeMin && std::abs (slowEnd - rangeMax) <= 0.005 * rangeMax,
+           fmt ("table mapping returns its seconds within 2%% at 0.2 / 0.7 / 2 / 6 s; the two ends match the solver (%.4f vs %.4f s, %.3f vs %.3f s)",
+                fastEnd, (double) rangeMin, slowEnd, (double) rangeMax));
 }
 
 //== The clippers ===============================================================================
@@ -780,6 +871,17 @@ void testCpu()
 int main (int argc, char** argv)
 {
     const bool quick = argc > 1 && std::strcmp (argv[1], "--quick") == 0;
+    if (argc > 1 && std::strcmp (argv[1], "--release-table") == 0)
+    {
+        // The grid: 0 ohms, then 32 log-spaced points 0.1 decade apart ending at 250 k.
+        for (int k = 0; k < 33; ++k)
+        {
+            const double ohms = k == 0 ? 0.0 : 250.0e3 * std::pow (10.0, -0.1 * (32 - k));
+            std::printf ("%2d %10.2f ohm %.5f s\n", k, ohms,
+                         fx::SslE10Dynamics::compressorTenPercentSeconds ((float) ohms, 48000.0));
+        }
+        return 0;
+    }
     const auto t0 = std::chrono::steady_clock::now();
     testControls();
     if (! quick)

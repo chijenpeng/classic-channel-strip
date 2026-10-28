@@ -73,8 +73,10 @@ public:
     /** The largest output sample (absolute, 1.0 = 0 dBFS) on a channel since the last call, then
         starts over. Lock-free; for meters. */
     float takeOutputPeak (int channel) noexcept;
-    /** Peak gain reduction since the last call, in positive dB. */
-    float takeCompressorReduction() noexcept { return compressorReduction.exchange (0.0f); }
+    /** The compressor's gain reduction over the last host block, in positive dB. It is held, not
+        taken: several reads between two blocks see the same value (the editor's timer reads it
+        at 30 Hz). Lock-free; for the GR meter. */
+    float compressorReductionDb() const noexcept { return compressorReduction.load (std::memory_order_relaxed); }
     /** The largest level that reached the card's op-amp clippers (the section outputs) above their
         linear limit (+-14.85 V = +4.6 dBFS at the card) since the last call, in dBFS at the card
         (after the Input trim, the filters' and bands' gain included); -120 when the card stayed

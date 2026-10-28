@@ -96,14 +96,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout Ssl4000EqProcessor::createLa
                                                               juce::StringArray { "1x", "2x" }, 1));
     // Appended after the original 20 parameters: old sessions and automation keep their order.
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { ParamID::dynOn, 1 }, "Dynamics",
-                                                              juce::StringArray { "Out", "In" }, 0));
+                                                              juce::StringArray { "Out", "In" }, 1));
     layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { ParamID::compThreshold, 1 }, "Comp threshold",
                                                              juce::NormalisableRange<float> (-20.0f, 10.0f), 10.0f, attributesFor ("dB")));
     layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { ParamID::compRatio, 1 }, "Comp ratio",
-                                                             logRange (1.0f, 20.0f), 2.0f,
+                                                             logRange (1.0f, 20.0f), 5.0f,
                                                              juce::AudioParameterFloatAttributes().withStringFromValueFunction (ratioText).withValueFromStringFunction (numberValue)));
     layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { ParamID::compRelease, 1 }, "Comp release",
-                                                             logRange (0.1f, 4.0f), 0.4f,
+                                                             logRange (0.1f, 4.0f), 0.1f,
                                                              juce::AudioParameterFloatAttributes().withLabel ("s").withStringFromValueFunction (secondsText).withValueFromStringFunction (numberValue)));
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { ParamID::compFast, 1 }, "Comp attack",
                                                               juce::StringArray { "Auto", "Fast" }, 0));
@@ -303,6 +303,7 @@ void Ssl4000EqProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
         }
     };
     holdPeaks (inputPeak);   // before the Input trim
+    float blockReduction = 0.0f;   // the compressor's largest reduction this block, in dB
 
     const int index = requested.load (std::memory_order_acquire);
     acknowledged.store (index, std::memory_order_release);
@@ -383,6 +384,7 @@ void Ssl4000EqProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
                         runKey (*engine.sidechainEq[0]);
                 }
                 engine.dynamics.process (left, right, scLeft, scRight, internalLength);
+                blockReduction = juce::jmax (blockReduction, engine.dynamics.compressorGainReductionDb());
             };
 
             if (! postEq)
@@ -405,11 +407,13 @@ void Ssl4000EqProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
         applyGain (outputGain, start, len);
     }
 
+    // The block's largest reduction is stored, not taken: the editor may read it more than once per block.
+    compressorReduction.store (blockReduction, std::memory_order_relaxed);
+
     const auto holdReduction = [] (std::atomic<float>& held, float value)
     {
         for (float old = held.load (std::memory_order_relaxed); value > old && ! held.compare_exchange_weak (old, value);) {}
     };
-    holdReduction (compressorReduction, engine.dynamics.compressorGainReductionDb());
     holdReduction (cardOverloadVolts, engine.cards[0]->takeOverloadVolts());
 
     holdPeaks (outputPeak);
@@ -456,7 +460,13 @@ void Ssl4000EqProcessor::setStateInformation (const void* data, int sizeInBytes)
                 {
                     juce::ValueTree value ("PARAM");
                     value.setProperty ("id", id, nullptr);
-                    value.setProperty ("value", ranged->convertFrom0to1 (ranged->getDefaultValue()), nullptr);
+                    // A session saved before these controls existed keeps the sound it had (dynamics out,
+                    // 2:1), whatever the defaults for new instances are.
+                    float plain = ranged->convertFrom0to1 (ranged->getDefaultValue());
+                    if (id == ParamID::dynOn)          plain = 0.0f;   // Out
+                    else if (id == ParamID::compRatio) plain = 2.0f;
+                    else if (id == ParamID::compRelease) plain = 0.4f;
+                    value.setProperty ("value", plain, nullptr);
                     restored.appendChild (value, nullptr);
                 }
             }

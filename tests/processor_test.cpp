@@ -108,6 +108,12 @@ int main()
         for (int i = 0; ok && i < 33; ++i)
             ok = dynamic_cast<juce::RangedAudioParameter*> (params[i])->getParameterID() == order[i];
         check (ok, "33 stable parameters: the original 20 first, then the complete 82E10 dynamics and routing controls");
+        // New instances: dynamics in at 5:1, dynamics before the EQ (the defaults changed; IDs, ranges and orders did not).
+        check (p.apvts.getRawParameterValue (ParamID::dynOn)->load() == 1.0f && std::abs (p.apvts.getRawParameterValue (ParamID::compRatio)->load() - 5.0f) < 1e-3f
+                   && p.apvts.getRawParameterValue (ParamID::dynPosition)->load() == 0.0f,
+               "new defaults: dynamics In, comp ratio 5:1, dynamics position Pre EQ");
+        check (std::abs (p.apvts.getRawParameterValue (ParamID::compRelease)->load() - 0.1f) < 1e-4f,
+               "new default: comp release 0.1 s");
         const auto* hpf = p.apvts.getParameter ("hpf_freq");
         const auto* lpf = p.apvts.getParameter ("lpf_freq");
         check (std::abs (hpf->convertFrom0to1 (0.5f) - std::sqrt (16.0f * 390.0f)) < 0.1f && std::abs (lpf->convertFrom0to1 (0.5f) - std::sqrt (3200.0f * 22000.0f)) < 1.0f
@@ -140,8 +146,9 @@ int main()
         juce::AudioProcessor::copyXmlToBinary (*oldXml, oldState);
         set (q, ParamID::dynOn, 1.0f); set (q, ParamID::gateRange, 40.0f);
         q.setStateInformation (oldState.getData(), (int) oldState.getSize());
-        check (v (ParamID::dynOn) == 0.0f && std::abs (v (ParamID::compRatio) - 2.0f) < 1e-3f && v (ParamID::gateRange) == 0.0f,
-               "an EQ-only session with no dynamics properties migrates to safe defaults");
+        check (v (ParamID::dynOn) == 0.0f && std::abs (v (ParamID::compRatio) - 2.0f) < 1e-3f && v (ParamID::gateRange) == 0.0f
+                   && std::abs (v (ParamID::compRelease) - 0.4f) < 1e-4f,
+               "an EQ-only session with no dynamics properties keeps dynamics out at 2:1 and release 0.4 s (not the new defaults)");
     }
 
     std::printf ("Mono and stereo, latency\n");
@@ -179,6 +186,7 @@ int main()
 
         // Mono layout.
         Ssl4000EqProcessor m;
+        set (m, ParamID::dynOn, 0.0f);   // the card alone: the default is now dynamics In
         m.setBusesLayout (mono);
         m.setPlayConfigDetails (1, 1, 48000.0, 256);
         m.prepareToPlay (48000.0, 256);
@@ -192,7 +200,7 @@ int main()
     std::printf ("Meters\n");
     {
         // Input -20 dB, Output -6 dB: the input meter reads before the trim, the output after.
-        auto p = make (true, { { ParamID::input, -20.0f }, { ParamID::output, -6.0f } });
+        auto p = make (true, { { ParamID::input, -20.0f }, { ParamID::output, -6.0f }, { ParamID::dynOn, 0.0f } });
         juce::AudioBuffer<float> io (2, 9600);
         for (int i = 0; i < io.getNumSamples(); ++i)
             for (int ch = 0; ch < 2; ++ch)
@@ -221,11 +229,11 @@ int main()
             return juce::Decibels::gainToDecibels ((float) std::sqrt (sum / 24000.0));
         };
 
-        auto dry = make (false, {});
+        auto dry = make (false, { { ParamID::dynOn, 0.0f } });   // the bypass reference: dynamics out explicitly
         auto comp = make (false, { { ParamID::dynOn, 1.0f }, { ParamID::compThreshold, -10.0f }, { ParamID::compRatio, 4.0f },
                                    { ParamID::compMakeup, 0.0f }, { ParamID::compRelease, 0.1f } });
         const float dryDb = sineLevel (*dry, 0.25f), compDb = sineLevel (*comp, 0.25f, -1);
-        const float compGr = comp->takeCompressorReduction();
+        const float compGr = comp->compressorReductionDb();
         check (compDb < dryDb - 8.0f && compGr > 8.0f,
                "4:1 compressor reduces a -12 dBFS peak tone from " + juce::String (dryDb, 2) + " to " + juce::String (compDb, 2)
                    + " dBFS; meter " + juce::String (compGr, 2) + " dB");
@@ -245,7 +253,7 @@ int main()
         auto post = make (false, Settings (routeBase));
         set (*post, ParamID::dynPosition, 1.0f);
         sineLevel (*pre, 0.10f, -1); sineLevel (*post, 0.10f, -1);
-        const float preGr = pre->takeCompressorReduction(), postGr = post->takeCompressorReduction();
+        const float preGr = pre->compressorReductionDb(), postGr = post->compressorReductionDb();
         check (postGr > preGr + 5.0f,
                "post-EQ routing lets the boosted EQ drive the detector (" + juce::String (preGr, 2) + " dB pre, " + juce::String (postGr, 2) + " dB post)");
 
@@ -254,7 +262,7 @@ int main()
         auto filterKey = make (false, { { ParamID::dynOn, 1.0f }, { ParamID::compThreshold, -20.0f }, { ParamID::compRatio, 10.0f },
                                        { ParamID::compMakeup, 0.0f }, { "hpf_on", 1.0f }, { "hpf_freq", 390.0f }, { ParamID::sidechainSource, 1.0f } });
         sineLevel (*inputKey, 0.25f, -1, 50.0); sineLevel (*filterKey, 0.25f, -1, 50.0);
-        const float inputGr = inputKey->takeCompressorReduction(), filterGr = filterKey->takeCompressorReduction();
+        const float inputGr = inputKey->compressorReductionDb(), filterGr = filterKey->compressorReductionDb();
         check (filterGr < inputGr - 8.0f,
                "FILTERS sidechain removes low-frequency key energy (" + juce::String (inputGr, 2) + " dB input key, " + juce::String (filterGr, 2) + " dB filtered key)");
 
@@ -279,7 +287,7 @@ int main()
         double extSum = 0.0;
         for (int i = 24000; i < 48000; ++i) extSum += keyed.getSample (0, i) * keyed.getSample (0, i);
         const float extDb = juce::Decibels::gainToDecibels ((float) std::sqrt (extSum / 24000.0));
-        check (extDb < -60.0f && external.takeCompressorReduction() > 15.0f && extAllocs == 0,
+        check (extDb < -60.0f && external.compressorReductionDb() > 15.0f && extAllocs == 0,
                "external mono key compresses linked stereo without audio-thread allocation (output " + juce::String (extDb, 2) + " dBFS)");
     }
 
@@ -297,7 +305,9 @@ int main()
         for (const auto& c : cases)
             for (bool twoX : { false, true })
             {
-                auto p = make (twoX, c.s);
+                Settings card = c.s;
+                card.insert (card.begin(), { ParamID::dynOn, 0.0f });   // the card alone: the default is now dynamics In
+                auto p = make (twoX, card);
                 juce::AudioBuffer<float> io (2, 1 << 17);
                 io.clear();
                 io.setSample (0, 0, 0.01f);

@@ -115,7 +115,7 @@ private:
     int holdTicks = 0;
 };
 
-/** Compressor gain reduction on the sibling 1176 VU face, with a numeric GR readout. */
+/** Compressor gain reduction on the sibling 1176 VU face. */
 class ReductionMeter final : public juce::Component
 {
 public:
@@ -126,7 +126,8 @@ public:
 private:
     float angleFor (float reductionDb) const noexcept;
 
-    float compressor = 0.0f;
+    float smoothed = 0.0f;     // the VU follower's state, dB
+    float shownDb = 0.0f;      // what is drawn (the needle), dB
 };
 
 /** The whole editor at its reference size; the window scales it. */

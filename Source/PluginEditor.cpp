@@ -45,7 +45,7 @@ namespace
         the whole view, so nothing else needs to know the scale. Groups are set apart by space. */
     namespace Layout
     {
-        constexpr int margin = 24, headerHeight = 50, laneY = 50;
+        constexpr int margin = 24, laneY = 50;
         constexpr int knobCell = 84, knobDisc = 48, trimDisc = 36;
         constexpr int bandLabelColumn = 32, bandPitch = 98;
         constexpr int rightX = 344, rightWidth = 252, rowPitch = 20;
@@ -429,14 +429,17 @@ ReductionMeter::ReductionMeter() = default;
 
 void ReductionMeter::push (float compressorDb)
 {
-    const auto follow = [] (float next, float shown)
+    // VU-style ballistics chosen for this plug-in: a first-order follow with a 65 ms time constant,
+    // the same up and down. The 82E10's own GR display is a 3/6/10/14/20 dB comparator ladder that
+    // does not feed the audio, so there is no hardware needle law to copy.
+    constexpr float kTimeConstantSeconds = 0.065f;
+    const float k = 1.0f - std::exp (-(1.0f / (float) LevelMeter::kRateHz) / kTimeConstantSeconds);
+    smoothed += (compressorDb - smoothed) * k;
+    // Repaint when the needle would move visibly: compared with what is on screen, so a slow drift
+    // cannot leave the needle behind by more than 0.05 dB.
+    if (std::abs (smoothed - shownDb) > 0.05f)
     {
-        return next > shown ? next : juce::jmax (0.0f, shown - 24.0f / LevelMeter::kRateHz);
-    };
-    const float nextComp = follow (compressorDb, compressor);
-    if (std::abs (nextComp - compressor) > 0.05f)
-    {
-        compressor = nextComp;
+        shownDb = smoothed;
         repaint();
     }
 }
@@ -487,19 +490,10 @@ void ReductionMeter::paint (juce::Graphics& g)
     g.drawText ("VU", juce::Rectangle<float> (face.getX(), pivot.y - radius + 35.0f, face.getWidth(), 12.0f),
                 juce::Justification::centred, false);
 
-    auto readout = hood.reduced (8.0f, 0.0f);
-    g.setColour (Theme::label);
-    g.setFont (Theme::labelFont (8.0f));
-    g.drawText ("GR", readout.removeFromLeft (18.0f), juce::Justification::centredLeft, false);
-    g.setFont (Theme::valueFont (9.0f));
-    g.drawText ((compressor >= 0.05f ? juce::String::charToString (0x2212) : juce::String())
-                    + juce::String (compressor, 1) + " dB", readout,
-                juce::Justification::centredLeft, false);
-
     juce::Graphics::ScopedSaveState state (g);
     g.reduceClipRegion (face.withBottom (hood.getY()).toNearestInt());
     g.setColour (Theme::pale);
-    g.drawLine ({ pivot, pivot.getPointOnCircumference (radius + 2.0f, angleFor (-compressor)) }, 1.25f);
+    g.drawLine ({ pivot, pivot.getPointOnCircumference (radius + 2.0f, angleFor (-shownDb)) }, 1.25f);
 }
 
 float ReductionMeter::angleFor (float meterDb) const noexcept
@@ -571,17 +565,18 @@ EditorView::EditorView (Ssl4000EqProcessor& p)
     setHelp (overloadLamp, "Card overload", "Lights when an op-amp in the card goes past its linear limit (+-14.85 V, which is +4.6 dBFS at the card "
                                             "with the EQ flat; boosts lower it) and holds for about a second, reading the peak it reached. "
                                             "Turn Input down to stay clean.");
-    setHelp (reductionMeter, "Gain reduction", "The compressor's gain reduction on a VU face: the needle rests at 0 and falls to the left, "
-                                               "and the hood reads the peak reduction in dB. It stays at 0 while the compressor is out.");
+    setHelp (reductionMeter, "Gain reduction", "The compressor's gain reduction on a VU face: the needle rests at 0 and falls to the left. "
+                                               "It follows with VU-style ballistics chosen for this plug-in (65 ms, rising and falling alike). "
+                                               "It stays at 0 while the compressor is out.");
     setHelp (oversample, "Oversample", "The card at the host rate (1X) or twice it (2X). 2X adds 4 samples of latency and brings the bells and "
                                        "the LPF near 20 kHz within about a dB of the hardware.");
-    setHelp (dynOn, "Compressor", "Switches the stereo-linked 82E10 compressor/limiter in or out. OUT passes the audio through "
-                                  "bit-for-bit; the gate is permanently bypassed.");
+    setHelp (dynOn, "Compressor", "Switches the stereo-linked 82E10 compressor/limiter in or out; IN is the default. OUT passes the audio "
+                                  "through bit-for-bit; the gate is permanently bypassed.");
     setHelp (compThreshold, "Comp threshold", "The console's +10 to -20 dB threshold scale. Lower settings compress more and bring "
                                               "more automatic make-up gain.");
-    setHelp (compRatio, "Comp ratio", "Continuous from 1:1 to hard limiting (LIMIT); the D14/D1 diode network produces the soft knee.");
-    setHelp (compRelease, "Comp release", "0.1 to 4 seconds. The VCA recovers on the 82E10-style logarithmic release curve: short "
-                                          "for rhythmic material, long for smooth levelling.");
+    setHelp (compRatio, "Comp ratio", "Continuous from 1:1 to hard limiting (LIMIT), 5:1 by default; the D14/D1 diode network produces the soft knee.");
+    setHelp (compRelease, "Comp release", "0.1 to 4 seconds, 0.1 s by default. The VCA recovers on the 82E10-style logarithmic release curve: "
+                                          "short for rhythmic material, long for smooth levelling.");
     setHelp (compFast, "Comp attack", "AUTO is the program-dependent path (R21 10 k with C5 3.3 uF); FAST switches to R19 300 ohm, "
                                       "about 3 ms to settle.");
     setHelp (compMakeup, "Make-up", "AUTO applies the threshold- and ratio-linked make-up gain of the console control; OFF leaves the "
@@ -774,7 +769,7 @@ void EditorView::tick()
     inputMeter.push (juce::jmax (processor.takeInputPeak (0), processor.takeInputPeak (1)));
     outputMeter.push (juce::jmax (processor.takeOutputPeak (0), processor.takeOutputPeak (1)));
     overloadLamp.push (processor.takeCardOverload());
-    reductionMeter.push (processor.takeCompressorReduction());
+    reductionMeter.push (processor.compressorReductionDb());
 
     auto* under = juce::Desktop::getInstance().getMainMouseSource().getComponentUnderMouse();
     showHelpFor (under != nullptr && isParentOf (under) ? under : nullptr);
